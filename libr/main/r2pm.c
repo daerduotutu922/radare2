@@ -74,9 +74,9 @@ static int git_pull(const char *dir, bool reset) {
 		free (s);
 	}
 #if R2__WINDOWS__
-	char *s = r_str_newf ("cd %s && git pull && git diff", dir);
+	char *s = r_str_newf ("cd %s && git pull --quiet && git diff", dir);
 #else
-	char *s = r_str_newf ("cd '%s' && git pull && git diff | cat", dir);
+	char *s = r_str_newf ("cd '%s' && git pull --quiet", dir);
 #endif
 	int rc = r_sandbox_system (s, 1);
 	free (s);
@@ -256,7 +256,7 @@ static void striptrim(RList *list) {
 
 static void r2pm_upgrade(bool force) {
 #if R2__UNIX__
-	char *s = r_sys_cmd_str ("radare2 -qcq -- 2>&1 | grep r2pm | sed -e 's,$,;,g'", NULL, 0);
+	char *s = r_sys_cmd_str ("radare2 -NNqcq -- 2>&1 | grep r2pm | sed -e 's,$,;,g'", NULL, 0);
 	r_str_trim (s);
 	RList *list = r_str_split_list (s, "\n", -1);
 	striptrim (list);
@@ -343,7 +343,7 @@ static void r2pm_setenv(void) {
 	r_sys_setenv ("R2PM_GITDIR", gdir);
 	free (gdir);
 
-	char *pd = r_sys_cmd_str ("radare2 -H R2_USER_PLUGINS", NULL, NULL);
+	char *pd = r_sys_cmd_str ("radare2 -NN -H R2_USER_PLUGINS", NULL, NULL);
 	if (pd) {
 		if (R_STR_ISNOTEMPTY (pd)) {
 			r_str_trim (pd);
@@ -363,7 +363,7 @@ static void r2pm_setenv(void) {
 	char *pkgcfg = r_sys_getenv ("PKG_CONFIG_PATH");
 	char *r2pm_pkgcfg = r_xdg_datadir ("prefix/lib/pkgconfig");
 	if (R_STR_ISNOTEMPTY (pkgcfg)) {
-		char *pcp = r_str_newf ("%s:%s:%s", R2_PREFIX "/lib/pkgconfig", r2pm_pkgcfg, pkgcfg);
+		char *pcp = r_str_newf ("%s:%s:%s", r2pm_pkgcfg, R2_PREFIX "/lib/pkgconfig", pkgcfg);
 		r_sys_setenv ("PKG_CONFIG_PATH", pcp);
 		free (pcp);
 	} else {
@@ -377,6 +377,14 @@ static void r2pm_setenv(void) {
 	char *bindir = r_str_newf ("%s/bin", r2_prefix);
 	r_sys_setenv ("R2PM_BINDIR", bindir);
 	free (bindir);
+
+	char *libdir = r_str_newf ("%s/lib", r2_prefix);
+	r_sys_setenv ("R2PM_LIBDIR", libdir);
+	free (libdir);
+
+	char *incdir = r_str_newf ("%s/include", r2_prefix);
+	r_sys_setenv ("R2PM_INCDIR", incdir);
+	free (incdir);
 
 	char *oldpath = r_sys_getenv ("PATH");
 	if (!oldpath) {
@@ -419,7 +427,7 @@ static void r2pm_setenv(void) {
 		free (ldpath);
 		ldpath = newpath;
 	}
-	char *gr2_prefix = r_sys_cmd_str ("radare2 -H R2_PREFIX", NULL, NULL);
+	char *gr2_prefix = r_sys_cmd_str ("radare2 -NN -H R2_PREFIX", NULL, NULL);
 	if (gr2_prefix) {
 		r_str_trim (gr2_prefix);
 		if (R_STR_ISNOTEMPTY (gr2_prefix)) {
@@ -668,7 +676,7 @@ static bool r2pm_check(const char *program) {
 	return found;
 }
 
-static int r2pm_install_pkg(const char *pkg, bool global) {
+static int r2pm_install_pkg(const char *pkg, bool clean, bool global) {
 	bool have_builddir = r2pm_have_builddir (pkg);
 	R_LOG_INFO ("Starting install for %s", pkg);
 	char *needs = r2pm_get (pkg, "\nR2PM_NEEDS ", TT_TEXTLINE);
@@ -692,25 +700,60 @@ static int r2pm_install_pkg(const char *pkg, bool global) {
 					const char *const cmd = "apt install build-essential git make patch python wget binutils";
 					R_LOG_INFO ("Running %s");
 					r_sys_cmd (cmd);
-					return r2pm_install_pkg (pkg, global);
+					return r2pm_install_pkg (pkg, clean, global);
 				}
 			}
 			return -1;
 		}
+	}
+	char *conflict = r2pm_get (pkg, "\nR2PM_CONFLICT ", TT_TEXTLINE);
+	if (conflict) {
+		RListIter *iter, *iter2;
+		RList *l = r_str_split_list (conflict, " ", 0); // conflictive packages
+		char *pkgdir = r2pm_pkgdir (); // installed packages
+		RList *files = r_sys_dir (pkgdir);
+		free (pkgdir);
+		if (!files) {
+			return -1;
+		}
+		const char *file, *dep;
+		r_list_foreach (files, iter, file) {
+			if (*file != '.') {
+				r_list_foreach (l, iter2, dep) {
+					if (!strcmp (dep, file)) {
+						R_LOG_ERROR ("This package conflicts with %s", file);
+						return -1;
+					}
+				}
+			}
+		}
+		r_list_free (files);
+		r_list_free (l);
 	}
 	char *deps = r2pm_get (pkg, "\nR2PM_DEPS ", TT_TEXTLINE);
 	if (deps) {
 		char *dep;
 		RListIter *iter;
 		RList *l = r_str_split_list (deps, " ", 0);
+		char *pkgdir = r2pm_gitdir ();
 		r_list_foreach (l, iter, dep) {
+			if (!clean) {
+				// skip dep if already installed
+				char *srcdir = r_file_new (pkgdir, pkg, NULL);
+				bool is_installed = r_file_is_directory (srcdir);
+				free (srcdir);
+				if (is_installed) {
+					continue;
+				}
+			}
 			if (r2pm_clone (dep) == 0) {
-				r2pm_install_pkg (dep, false); // XXX get current pkg global value
+				r2pm_install_pkg (dep, clean, false); // XXX get current pkg global value
 			} else {
 				R_LOG_ERROR ("Cannot clone %s", dep);
 				// ignore return -1;
 			}
 		}
+		free (pkgdir);
 	}
 	char *srcdir = r2pm_gitdir ();
 	r2pm_setenv ();
@@ -760,7 +803,7 @@ static int r2pm_install_pkg(const char *pkg, bool global) {
 #else
 	char *script = r2pm_get (pkg, "\nR2PM_INSTALL() {\n", TT_CODEBLOCK);
 	if (!script) {
-		R_LOG_ERROR ("Cannot find the R2PM_INSTALL() {} script block for '%s'", pkg);
+		R_LOG_ERROR ("Cannot find '%s' package or missing R2PM_INSTALL block", pkg);
 		free (srcdir);
 		return 1;
 	}
@@ -806,7 +849,7 @@ static int r2pm_install(RList *targets, bool uninstall, bool clean, bool force, 
 	RListIter *iter;
 	const char *t;
 	int rc = 0;
-	char *r2v = r_sys_cmd_str ("radare2 -qv", NULL, NULL);
+	char *r2v = r_sys_cmd_str ("radare2 -NNqv", NULL, NULL);
 	if (R_STR_ISEMPTY (r2v)) {
 		R_LOG_ERROR ("Cannot run radare2 -qv");
 		free (r2v);
@@ -845,7 +888,7 @@ static int r2pm_install(RList *targets, bool uninstall, bool clean, bool force, 
 			r2pm_clean_pkg (t);
 		}
 		if (r2pm_clone (t) == 0) {
-			rc |= r2pm_install_pkg (t, global);
+			rc |= r2pm_install_pkg (t, clean, global);
 		} else {
 			R_LOG_ERROR ("Cannot clone %s", t);
 			rc = 1;
@@ -1000,6 +1043,7 @@ static void r2pm_envhelp(bool verbose) {
 	if (verbose) {
 		char *r2pm_plugdir = r_sys_getenv ("R2PM_PLUGDIR");
 		char *r2pm_bindir = r_sys_getenv ("R2PM_BINDIR");
+		char *r2pm_libdir = r_sys_getenv ("R2PM_LIBDIR");
 		char *r2pm_dbdir = r_sys_getenv ("R2PM_DBDIR");
 		char *r2pm_prefix = r_sys_getenv ("R2PM_PREFIX");
 		char *r2pm_gitdir = r_sys_getenv ("R2PM_GITDIR");
@@ -1011,6 +1055,7 @@ static void r2pm_envhelp(bool verbose) {
 			"R2PM_PLUGDIR=%s\n"
 			"R2PM_PREFIX=%s\n"
 			"R2PM_BINDIR=%s\n"
+			"R2PM_LIBDIR=%s\n"
 			"R2PM_OFFLINE=%d         # don't git pull\n"
 			"R2PM_LEGACY=0\n"
 			"R2PM_DBDIR=%s\n"
@@ -1018,6 +1063,7 @@ static void r2pm_envhelp(bool verbose) {
 			r2pm_plugdir,
 			r2pm_prefix,
 			r2pm_bindir,
+			r2pm_libdir,
 			r2pm_offline,
 			r2pm_dbdir,
 			r2pm_gitdir);
@@ -1031,6 +1077,8 @@ static void r2pm_envhelp(bool verbose) {
 			"R2PM_TIME\n"
 			"R2PM_PLUGDIR\n"
 			"R2PM_BINDIR\n"
+			"R2PM_INCDIR\n"
+			"R2PM_LIBDIR\n"
 			"R2PM_OFFLINE\n"
 			"R2PM_PREFIX\n"
 			"R2PM_LEGACY\n"
@@ -1209,6 +1257,15 @@ R_API int r_main_r2pm(int argc, const char **argv) {
 			r2pm_envhelp (true);
 		}
 		return r2pm.rc;
+	}
+	{
+		char *dbdir = r2pm_dbdir ();
+		char *readme = r_file_new (dbdir, "..", "README.md", NULL);
+		if (!r_file_exists (readme)) {
+			r2pm.init = true;
+		}
+		free (readme);
+		free (dbdir);
 	}
 	if (r2pm.init) {
 		r2pm_update (r2pm.force);

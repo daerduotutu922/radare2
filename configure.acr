@@ -137,35 +137,34 @@ HAVE_LIB_GMP = 0 ;
 
 
 (( openssl is used for https:// in rsocket and crypto/hash ))
-CHKLIB ssl
-PKGCFG SSL_CFLAGS SSL_LDFLAGS openssl
-IFNOTNULL SSL_LDFLAGS {
-	HAVE_OPENSSL = 1 ;
-}
-
 ARG_WITH WANT_SSL ssl build with (Open|Boring|..)SSL if possible ;
-IFAND WANT_SSL HAVE_OPENSSL {
-	HAVE_OPENSSL = 1 ;
-}{
+ARG_WITH WANT_SSL_CRYPTO ssl-crypto build crypto code with libssl ;
+IFNOT WANT_SSL {
 	HAVE_OPENSSL = 0 ;
 	SSL_CFLAGS = "" ;
 	SSL_LDFLAGS = "" ;
-}
-IFNULL SSL_LDFLAGS {
-	IFNOT HAVE_LIB_SSL {
-		HAVE_OPENSSL = 0 ;
+}{
+	CHKLIB ssl
+	PKGCFG SSL_CFLAGS SSL_LDFLAGS openssl
+	IFNOTNULL SSL_LDFLAGS {
+		HAVE_OPENSSL = 1 ;
+	}
+
+	IFNULL SSL_LDFLAGS {
+		IFNOT HAVE_LIB_SSL {
+			HAVE_OPENSSL = 0 ;
+		}{
+			SSL_LDFLAGS = -lssl ;
+		}
+	}
+	IFAND WANT_SSL_CRYPTO HAVE_OPENSSL {
+		WANT_SSL_CRYPTO = 1 ;
 	}{
-		SSL_LDFLAGS = -lssl ;
+		WANT_SSL_CRYPTO = 0 ;
 	}
 }
-ARG_WITH WANT_SSL_CRYPTO ssl-crypto build crypto code with libssl ;
-IFAND WANT_SSL_CRYPTO HAVE_OPENSSL {
-	WANT_SSL_CRYPTO = 1 ;
-}{
-	WANT_SSL_CRYPTO = 0 ;
-}
 
-ARG_WITH WANT_LIBUV libuv disable libuv dependency ;
+ARG_WITH WANT_LIBUV libuv use libuv if available ;
 CHKVER libuv 1.0.0
 IF HAVE_LIBUV_VERSION_1_0_0 {
 	PKGCFG LIBUV_CFLAGS LIBUV_LDFLAGS libuv
@@ -230,10 +229,13 @@ IFEQ USEROSTYPE auto ; {
 	}{
 	IFEQ HOST_OS darwin ; {
 		USEROSTYPE = darwin ;
-        }{
+	}{
 	IFEQ HOST_OS haiku ; {
 		USEROSTYPE = haiku ;
-	} } } } } } } } } } } } }
+	}{
+	IFEQ HOST_OS aix ; {
+		USEROSTYPE = aix ;
+	} } } } } } } } } } } } } }
 }
 
 (( this hack is required for openbsd ports ))
@@ -272,9 +274,13 @@ IFEQ USEROSTYPE haiku ; {
 	HAVE_PTRACE = 0 ;
 	USE_PTRACE_WRAP = 0 ;
 }{
+IFEQ USEROSTYPE aix ; {
+	HAVE_PTRACE = 0 ;
+	USE_PTRACE_WRAP = 0 ;
+}{
 	HAVE_PTRACE = 1 ;
 	USE_PTRACE_WRAP = 0 ;
-} } } } } }
+} } } } } } }
 
 IFNOT DEBUGGER {
 	HAVE_PTRACE = 0 ;
@@ -285,10 +291,11 @@ IFEQ WANT_PTRACE_WRAP 0 ; {
 }
 
 ARG_WITH R_CHECKS_LEVEL=2 checks-level value between 0 and 3 to enable different level of assert (see R_CHECKS_LEVEL) ;
+ARG_DISABLE WANT_DEBUGSTUFF debug-stuff disable the log messages and disable control-c ;
 
 REPORT
 	BUILD CC CFLAGS DEBUGGER HAVE_ARC4RANDOM_UNIFORM HAVE_EXPLICIT_BZERO
-	HAVE_EXPLICIT_MEMSET HAVE_FORK HAVE_GPERF HAVE_LIBUV HAVE_LIB_GMP
+	HAVE_EXPLICIT_MEMSET HAVE_FORK HAVE_GPERF HAVE_LIBUV HAVE_LIB_GMP WANT_DEBUGSTUFF
 	HAVE_OPENSSL WANT_SSL_CRYPTO HAVE_PTRACE HOST LDFLAGS LIBVERSION PKGCONFIG PREFIX
 	R_CHECKS_LEVEL TARGET USERCC USEROSTYPE USE_CAPSTONE USE_LIB_MAGIC NEW_IO_CACHE
 	USE_LIB_XXHASH USE_LIB_ZIP USE_PTRACE_WRAP USE_SYSLZ4 VERSION WANT_DYLINK USE_SMALLZ4

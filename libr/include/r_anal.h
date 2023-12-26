@@ -267,6 +267,7 @@ typedef struct r_anal_function_meta_t {
 } RAnalFcnMeta;
 
 typedef struct r_anal_function_t {
+	// TODO Use RBinName here
 	char *name;
 	char *realname; // R2_590: add realname for the mangled one
 	int bits; // ((> bits 0) (set-bits bits))
@@ -401,6 +402,10 @@ typedef struct r_anal_thread_t {
 	RReg *reg;
 } RAnalThread;
 
+typedef struct {
+	void *priv;
+} RAnalBacktraces;
+
 typedef struct r_ref_manager_t RefManager;
 
 typedef struct r_anal_t {
@@ -470,6 +475,7 @@ typedef struct r_anal_t {
 	RStrConstPool constpool;
 	RList *leaddrs;
 	char *pincmd;
+	RAnalBacktraces btstore;
 	/* private */
 	RThreadLock *lock;
 	ut64 cmpval;
@@ -626,16 +632,24 @@ typedef enum {
 	R_ANAL_REF_TYPE_DATA = 'd', // mem ref
 	R_ANAL_REF_TYPE_ICOD = 'i', // indirect code reference
 	R_ANAL_REF_TYPE_STRN = 's', // string ref
+	R_ANAL_REF_TYPE_MASK = 0xff,
 	// perm / direction
 	R_ANAL_REF_TYPE_READ = 4 << 8,
 	R_ANAL_REF_TYPE_WRITE = 2 << 8,
 	R_ANAL_REF_TYPE_EXEC = 1 << 8,
-	R_ANAL_REF_TYPE_MASK = 0xff,
-	R_ANAL_REF_TYPE_DIRECTION_MASK = 0xff00
+	R_ANAL_REF_PERM_MASK = 0xff00, // direction -> perm
+	R_ANAL_REF_DIRECTION_MASK = 0xff00, // direction -> perm
+	// SIZE
+	R_ANAL_REF_TYPE_SIZE_1 = 1 << 16,
+	R_ANAL_REF_TYPE_SIZE_2 = 2 << 16,
+	R_ANAL_REF_TYPE_SIZE_4 = 4 << 16,
+	R_ANAL_REF_TYPE_SIZE_8 = 8 << 16,
+	R_ANAL_REF_SIZE_MASK = 0xff0000
 } RAnalRefType;
 
 #define R_ANAL_REF_TYPE_PERM(x) (((x)>>8) & 0xff)
 #define R_ANAL_REF_TYPE_MASK(x) r_anal_ref_typemask((x))
+#define R_ANAL_REF_TYPE_SIZE(x)  (((x)>>16) & 0xff)
 
 typedef struct r_anal_ref_t {
 	ut64 at;
@@ -1021,7 +1035,6 @@ R_API RAnalFunction *r_anal_get_function_byname(RAnal *anal, const char *name);
 
 R_API int r_anal_function(RAnal *anal, RAnalFunction *fcn, ut64 addr, ut64 len, int reftype);
 R_API int r_anal_function_del(RAnal *anal, ut64 addr);
-R_API int r_anal_function_del_locs(RAnal *anal, ut64 addr);
 R_API bool r_anal_function_add_bb(RAnal *anal, RAnalFunction *fcn,
 		ut64 addr, ut64 size,
 		ut64 jump, ut64 fail, R_BORROW RAnalDiff *diff);
@@ -1051,6 +1064,7 @@ R_API void r_anal_del_jmprefs(RAnal *anal, RAnalFunction *fcn);
 R_API char *r_anal_function_get_json(RAnalFunction *function);
 R_API RAnalFunction *r_anal_function_next(RAnal *anal, ut64 addr);
 R_API char *r_anal_function_get_signature(RAnalFunction *function);
+R_API bool r_anal_function_del_signature(RAnal *a, const char *name);
 R_API int r_anal_str_to_fcn(RAnal *a, RAnalFunction *f, const char *_str);
 R_API int r_anal_function_count(RAnal *a, ut64 from, ut64 to);
 R_API RAnalBlock *r_anal_function_bbget_in(RAnal *anal, RAnalFunction *fcn, ut64 addr);
@@ -1067,6 +1081,7 @@ R_API bool r_anal_pin_set(RAnal *a, const char *name, const char *cmd);
 typedef bool (* RAnalRefCmp)(RAnalRef *ref, void *data);
 R_API RList *r_anal_ref_list_new(void);
 R_API const char *r_anal_ref_type_tostring(RAnalRefType t);
+R_API int r_anal_ref_size(RAnalRef *ref);
 R_API int r_anal_ref_typemask(int x);
 R_DEPRECATE R_API RAnalRefType r_anal_xrefs_type(char ch);
 
@@ -1552,6 +1567,15 @@ R_API bool r_anal_tid_kill(RAnal *anal, int tid);
 R_API RAnalThread *r_anal_tid_get(RAnal *anal, int tid);
 R_API int r_anal_tid_add(RAnal *anal, int map);
 R_API bool r_anal_tid_select(RAnal *anal, int tid);
+
+// bt
+
+R_VEC_TYPE (RVecBacktrace, ut64);
+R_API void r_anal_backtrace_add(RAnal *a, ut64 addr, RVecBacktrace *bt);
+R_API void r_anal_backtrace_del(RAnal *a, ut64 addr);
+R_API void r_anal_backtrace_init(RAnal *a);
+R_API void r_anal_backtrace_fini(RAnal *a);
+R_API void r_anal_backtrace_list(RAnal *a, ut64 addr, int opt);
 
 /* plugin pointers */
 extern RAnalPlugin r_anal_plugin_null;

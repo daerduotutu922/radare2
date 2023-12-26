@@ -139,11 +139,11 @@ typedef struct r_arch_session_t {
 } RArchSession;
 
 typedef enum {
-	R_ARCH_ESIL_INIT,
-	R_ARCH_ESIL_MAPS,
+	R_ARCH_ESIL_ACTION_INIT,
+	R_ARCH_ESIL_ACTION_MAPS,
 	// R_ARCH_ESIL_EVAL,
-	R_ARCH_ESIL_RESET,
-	R_ARCH_ESIL_FINI,
+	R_ARCH_ESIL_ACTION_RESET,
+	R_ARCH_ESIL_ACTION_FINI,
 } RArchEsilAction;
 
 typedef ut32 RArchDecodeMask;
@@ -198,6 +198,7 @@ R_API bool r_arch_unload_decoder(RArch *arch, const char *dname);
 R_API int r_arch_info(RArch *arch, int query);
 R_API bool r_arch_decode(RArch *a, RAnalOp *op, RArchDecodeMask mask);
 R_API bool r_arch_encode(RArch *a, RAnalOp *op, RArchEncodeMask mask);
+R_API bool r_arch_esilcb(RArch *a, RArchEsilAction action);
 //R_API bool r_arch_esil_init(RArch *arch, const char *dname, REsil *esil);
 //R_API void r_arch_esil_fini(RArch *arch, const char *dname, REsil *esil);
 
@@ -210,6 +211,7 @@ R_API RList *r_arch_session_preludes(RArchSession *as);
 
 // arch.c
 R_API RArch *r_arch_new(void);
+R_API RArchPlugin *r_arch_find(RArch *arch, const char *name);
 R_API bool r_arch_use(RArch *arch, RArchConfig *config, const char *name);
 
 // arch plugins management apis
@@ -288,6 +290,7 @@ extern const RArchPlugin r_arch_plugin_dalvik;
 extern const RArchPlugin r_arch_plugin_dis;
 extern const RArchPlugin r_arch_plugin_ebc;
 extern const RArchPlugin r_arch_plugin_evm;
+extern const RArchPlugin r_arch_plugin_fslsp;
 extern const RArchPlugin r_arch_plugin_gb;
 extern const RArchPlugin r_arch_plugin_h8300;
 extern const RArchPlugin r_arch_plugin_hppa_gnu;

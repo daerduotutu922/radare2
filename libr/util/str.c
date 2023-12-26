@@ -201,42 +201,14 @@ R_API ut64 r_str_bits_from_string(const char *buf, const char *bitz) {
 	return out;
 }
 
-R_API int r_str_binstr2bin(const char *str, ut8 *out, int outlen) {
-	int n, i, j, k, ret, len;
-	len = strlen (str);
-	for (n = i = 0; i < len; i += 8) {
-		ret = 0;
-		while (str[i] == ' ') {
-			str++;
-		}
-		if (i + 7 < len) {
-			for (k = 0, j = i + 7; j >= i; j--, k++) {
-				if (str[j] == ' ') {
-					continue;
-				}
-				if (str[j] == '1') {
-					ret |= (1 << k);
-				} else if (str[j] != '0') {
-					return n;
-				}
-			}
-		}
-		out[n++] = ret;
-		if (n == outlen) {
-			return n;
-		}
-	}
-	return n;
-}
-
 // Returns the permissions as in integer given an input in the form of rwx, rx,
 // etc.
 R_API int r_str_rwx(const char *str) {
 	int ret = atoi (str);
 	if (!ret) {
-		ret |= strchr (str, 'm') ? 16 : 0;
-		ret |= strchr (str, 'r') ? 4 : 0;
-		ret |= strchr (str, 'w') ? 2 : 0;
+		ret |= strchr (str, 'm')? 16: 0;
+		ret |= strchr (str, 'r')? 4: 0;
+		ret |= strchr (str, 'w')? 2: 0;
 		ret |= strchr (str, 'x') ? 1 : 0;
 	} else if (ret < 0 || ret >= R_ARRAY_SIZE (rwxstr)) {
 		ret = 0;
@@ -535,7 +507,7 @@ R_API const char *r_str_word_get0(const char *str, int idx) {
 
 // Return the number of times that the character ch appears in the string.
 R_API size_t r_str_char_count(const char *string, char ch) {
-	r_return_val_if_fail (string, 0);
+	R_RETURN_VAL_IF_FAIL (string, 0);
 	size_t i, count = 0;
 	for (i = 0; string[i]; i++) {
 		if (string[i] == ch) {
@@ -764,6 +736,7 @@ R_API char *r_str_newf(const char *fmt, ...) {
 	return p;
 }
 
+#if 0
 // Secure string copy with null terminator (like strlcpy or strscpy but ours
 R_API size_t r_str_ncpy(char *dst, const char *src, size_t n) {
 	size_t i;
@@ -780,6 +753,7 @@ R_API size_t r_str_ncpy(char *dst, const char *src, size_t n) {
 	dst[i] = 0;
 	return i;
 }
+#endif
 
 /* memccmp ("foo.bar", "foo.cow, '.') == 0 */
 // Returns 1 if src and dst are equal up until the first instance of ch in src.
@@ -931,6 +905,7 @@ R_API char *r_str_appendch(char *x, char y) {
 }
 
 R_API R_MUSTUSE char* r_str_replace_all(char *str, const char *key, const char *val) {
+	r_return_val_if_fail (str && key, NULL);
 	if (strstr (val, key)) {
 		// XXX value cant contain the key otherwise we go into infinite loop
 		R_LOG_ERROR ("RStr.replaceAll() value can't contain key");
@@ -1958,14 +1933,27 @@ R_API size_t r_str_ansi_nlen(const char *str, size_t slen) {
 	return len; // len > 0 ? len: 1;
 }
 
+static size_t __str_ansi_sanitize_length(char const *str) {
+	size_t i = 0;
+	if (str[0] == 0x1b || str[0] == 0x07 || str[0] == 0x05 || str[0] == 0x7f) { // ESC, BEL, ENQ, DEL
+		i++;
+	} else if (str[0] == -0x3e && str[1] >= -0x80 && str[1] <= -0x61) { // C1 control codes U+0080 - U+009F
+		i += 2;
+	}
+	return i;
+}
+
 // remove ansi escape codes from string, decolorizing it
 // TODO : optimize by just using two counter variables instead of strcpy()
 R_API size_t r_str_ansi_strip(char *str) {
 	size_t i = 0;
 	while (str[i]) {
 		size_t chlen = __str_ansi_length (str + i);
+		size_t sanitize_len = __str_ansi_sanitize_length (str + i);
 		if (chlen > 1) {
 			r_str_cpy (str + i, str + i + chlen);
+		} else if (sanitize_len > 0) {
+			r_str_cpy (str + i, str + i + sanitize_len);
 		} else {
 			i++;
 		}
@@ -3321,15 +3309,15 @@ R_API char *r_str_crop(const char *str, unsigned int x, unsigned int y,
 
 // TODO: improve loop to wrap by words
 R_API char *r_str_wrap(const char *str, int w) {
-	char *r, *ret;
 	if (w < 1 || !str) {
 		return strdup ("");
 	}
 	size_t r_size = 8 * strlen (str);
-	r = ret = malloc (r_size);
+	char *r = malloc (r_size);
 	if (!r) {
 		return NULL;
 	}
+	char *ret = r;
 	char *end = r + r_size;
 	int cw = 0;
 	while (*str && r + 1 < end) {
@@ -3435,6 +3423,37 @@ R_API bool r_str_endswith(const char *str, const char *needle) {
 	return !strcmp (str + (slen - nlen), needle);
 }
 
+R_API char *r_str_slice(const char *str, RStringSlice s) {
+	size_t len = s.to - s.from;
+	return r_str_ndup (str + s.from, len);
+}
+
+R_API RVecStringSlice *r_str_split_vec(const char *str, const char *c, int n) {
+	r_return_val_if_fail (str && c, NULL);
+	size_t b = 0;
+	// TODO honor 'c' and 'n'. not just split by ' '
+	RVecStringSlice *vs = RVecStringSlice_new ();
+	while (str[b]) {
+		const char ch = str[b];
+		if (isspace (ch)) {
+			b++;
+			continue;
+		}
+		RStringSlice slice = { b, 0 };
+		b++;
+		while (str[b]) {
+			const char ch = str[b];
+			if (isspace (ch)) {
+				break;
+			}
+			b++;
+		}
+		slice.to = b;
+		RVecStringSlice_push_back (vs, &slice);
+	}
+	return vs;
+}
+
 // Splits the string <str> by string <c> and returns the result in a list.
 // XXX should take const char * as argument!!
 R_API RList *r_str_split_list(char *str, const char *c, int n)  {
@@ -3442,7 +3461,8 @@ R_API RList *r_str_split_list(char *str, const char *c, int n)  {
 	RList *lst = r_list_newf (NULL);
 	char *aux = str; // XXX should be an strdup
 	int i = 0;
-	char  *e = aux;
+	char *e = aux;
+	const size_t clen = strlen (c);
 	for (;e;) {
 		e = strstr (aux, c);
 		if (n > 0) {
@@ -3452,7 +3472,8 @@ R_API RList *r_str_split_list(char *str, const char *c, int n)  {
 			}
 		}
 		if (e) {
-			*e++ =  0;
+			*e = 0;
+			e += clen;
 		}
 		r_str_trim (aux);
 		r_list_append (lst, aux);
@@ -3519,8 +3540,8 @@ R_API bool r_str_isnumber(const char *str) {
 	if (!str || (!IS_DIGIT (*str) && *str != '-')) {
 		return false;
 	}
-
 	for (str++; *str; str++) {
+		// consider '.' part of the number?
 		if (!IS_DIGIT (*str)) {
 			return false;
 		}
@@ -3800,17 +3821,15 @@ R_API int r_snprintf(char *string, int len, const char *fmt, ...) {
 
 // Strips all the lines in str that contain key
 R_API void r_str_stripLine(char *str, const char *key) {
-	size_t i, j, klen, slen, off;
-	const char *ptr;
-
 	if (!str || !key) {
 		return;
 	}
-	klen = strlen (key);
-	slen = strlen (str);
+	size_t i, j;
+	size_t klen = strlen (key);
+	size_t slen = strlen (str);
 
 	for (i = 0; i < slen; ) {
-		ptr = (char*) r_mem_mem ((ut8*) str + i, slen - i, (ut8*) "\n", 1);
+		const char *ptr = (char*) r_mem_mem ((ut8*) str + i, slen - i, (ut8*) "\n", 1);
 		if (!ptr) {
 			ptr = (char*) r_mem_mem ((ut8*) str + i, slen - i, (ut8*) key, klen);
 			if (ptr) {
@@ -3820,7 +3839,7 @@ R_API void r_str_stripLine(char *str, const char *key) {
 			break;
 		}
 
-		off = (size_t) (ptr - (str + i)) + 1;
+		size_t off = (size_t) (ptr - (str + i)) + 1;
 
 		ptr = (char*) r_mem_mem ((ut8*) str + i, off, (ut8*) key, klen);
 		if (ptr) {
@@ -3850,11 +3869,9 @@ R_API char *r_str_list_join(RList *str, const char *sep) {
 R_API char *r_str_array_join(const char **a, size_t n, const char *sep) {
 	RStrBuf *sb = r_strbuf_new ("");
 	size_t i;
-
 	if (n > 0) {
 		r_strbuf_append (sb, a[0]);
 	}
-
 	for (i = 1; i < n; i++) {
 		r_strbuf_append (sb, sep);
 		r_strbuf_append (sb, a[i]);

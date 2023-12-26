@@ -38,6 +38,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+// #if __STDC_VERSION__ < 201112L
+// This requires C11
+#undef static_assert
+#define static_assert(x,y)
+// #endif
+
 /// cwisstable/internal/base.h /////////////////////////////////////////////////
 /// Feature detection and basic helper macros.
 
@@ -343,6 +349,24 @@
 
 #if CWISS_HAVE_MSAN
 #include <sanitizer/msan_interface.h>
+#endif
+
+/// Maximally careful endianness detection.
+/// Assume LITTLE_ENDIAN by default.
+#if defined(_AIX)
+# define CWISS_IS_BIG_ENDIAN 1
+#elif defined(__has_include)
+# if __has_include(<endian.h>)
+#   include <endian.h>
+#   if defined(__BYTE_ORDER) && (__BYTE_ORDER == __BIG_ENDIAN)
+#     define CWISS_IS_BIG_ENDIAN 1
+#   endif
+# endif
+#else
+# warning "Cannot detect endianness; assuming little-endian."
+#endif
+#ifndef CWISS_IS_BIG_ENDIAN
+# define CWISS_IS_BIG_ENDIAN 0
 #endif
 
 CWISS_BEGIN
@@ -846,10 +870,12 @@ typedef uint64_t CWISS_Group;
 #define CWISS_Group_kWidth ((size_t)8)
 #define CWISS_Group_kShift 3
 
-// NOTE: Endian-hostile.
 static inline CWISS_Group CWISS_Group_new(const CWISS_ControlByte* pos) {
 	CWISS_Group val;
 	memcpy(&val, pos, sizeof(val));
+#if CWISS_IS_BIG_ENDIAN
+	val = __builtin_bswap64(val);
+#endif
 	return val;
 }
 
@@ -966,7 +992,7 @@ static inline size_t RandomSeed(void) {
 	size_t value = counter++;
 #else
 	static CWISS_ATOMIC_T(size_t) counter;
-	size_t value = CWISS_ATOMIC_INC(counter);
+	size_t value = CWISS_ATOMIC_INC (counter);
 #endif
 	return value ^ ((size_t)&counter);
 }
@@ -991,7 +1017,8 @@ CWISS_INLINE_NEVER static void CWISS_ConvertDeletedToEmptyAndFullToDeleted( CWIS
 	CWISS_DCHECK(ctrl[capacity] == CWISS_kSentinel, "bad ctrl value at %zu: %02x", capacity, ctrl[capacity]);
 	CWISS_DCHECK(CWISS_IsValidCapacity(capacity), "invalid capacity: %zu", capacity);
 
-	for (CWISS_ControlByte* pos = ctrl; pos < ctrl + capacity; pos += CWISS_Group_kWidth) {
+	CWISS_ControlByte* pos;
+	for (pos = ctrl; pos < ctrl + capacity; pos += CWISS_Group_kWidth) {
 		CWISS_Group g = CWISS_Group_new(pos);
 		CWISS_Group_ConvertSpecialToEmptyAndFullToDeleted(&g, pos);
 	}
@@ -2336,7 +2363,8 @@ static inline CWISS_RawTable CWISS_RawTable_dup(const CWISS_Policy* policy,
 	// `CWISS_RawTable_rehash_and_grow_if_necessary()` because we are already
 	// big enough (since `self` is a priori) and tombstones cannot be created
 	// during this process.
-	for (CWISS_RawIter iter = CWISS_RawTable_citer(policy, self);
+	CWISS_RawIter iter;
+	for (iter = CWISS_RawTable_citer(policy, self);
 			CWISS_RawIter_get(policy, &iter); CWISS_RawIter_next(policy, &iter)) {
 		void* v = CWISS_RawIter_get(policy, &iter);
 		size_t hash = policy->key->hash(v);

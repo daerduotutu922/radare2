@@ -359,7 +359,7 @@ static bool cb_analhpskip(void *user, void *data) {
 }
 
 static void update_analarch_options(RCore *core, RConfigNode *node) {
-	// XXX R2_590 - does nothing, but needs testing to proove that
+	// XXX R2_590 - does nothing, but needs testing to prove that
 	RAnalPlugin *h;
 	RListIter *it;
 	if (core && core->anal && node) {
@@ -806,38 +806,6 @@ static bool cb_asmarch(void *user, void *data) {
 	}
 	//we should strdup here otherwise will crash if any r_config_set
 	//free the old value
-	char *asm_cpu = strdup (r_config_get (core->config, "asm.cpu"));
-#if 0
-	if (core->rasm->cur) {
-		const char *new_asm_cpu = core->rasm->config->cpu;
-		if (R_STR_ISNOTEMPTY (new_asm_cpu)) {
-			char *nac = strdup (new_asm_cpu);
-			char *comma = strchr (nac, ',');
-			if (comma) {
-				if (!*asm_cpu || (*asm_cpu && !strstr (nac, asm_cpu))) {
-					*comma = 0;
-					r_config_set (core->config, "asm.cpu", nac);
-				}
-			}
-			free (nac);
-		} else {
-			// TODO: set to '' only if the new arch plugin doesnt handle
-			// the given asm.cpu setup, but we can ignore for now
-			// r_config_set (core->config, "asm.cpu", "");
-		}
-		bits = core->rasm->config->bits;
-		if (8 & bits) {
-			bits = 8;
-		} else if (16 & bits) {
-			bits = 16;
-		} else if (32 & bits) {
-			bits = 32;
-		} else {
-			bits = 64;
-		}
-		update_asmbits_options (core, r_config_node_get (core->config, "asm.bits"));
-	}
-#endif
 	snprintf (asmparser, sizeof (asmparser), "%s.pseudo", node->value);
 	r_config_set (core->config, "asm.parser", asmparser);
 
@@ -885,10 +853,9 @@ static bool cb_asmarch(void *user, void *data) {
 	// try to set endian of RAsm to match binary
 	r_asm_set_big_endian (core->rasm, bigbin);
 
-	r_asm_set_cpu (core->rasm, asm_cpu);
-	free (asm_cpu);
 	RConfigNode *asmcpu = r_config_node_get (core->config, "asm.cpu");
 	if (asmcpu) {
+		r_asm_set_cpu (core->rasm, asmcpu->value);
 		update_asmcpu_options (core, asmcpu);
 	}
 	{
@@ -899,8 +866,8 @@ static bool cb_asmarch(void *user, void *data) {
 	// changing asm.arch changes anal.arch
 	// changing anal.arch sets types db
 	// so ressetting is redundant and may lead to bugs
-	// 1 case this is usefull is when sdb_types is null
-	if (!core->anal || !core->anal->sdb_types) {
+	// 1 case this is useful is when sdb_types is null
+	if (!core->anal->sdb_types) {
 		r_core_anal_type_init (core);
 	}
 	r_core_anal_cc_init (core);
@@ -944,17 +911,6 @@ static bool cb_asmbits(void *user, void *data) {
 	}
 	if (bits > 0) {
 		ret = r_asm_set_bits (core->rasm, bits);
-#if 0
-		if (!ret) {
-			RAsmPlugin *h = core->rasm->cur;
-			if (!h) {
-				// r_asm_use (core->rasm, R_SYS_ARCH);
-				//	R_LOG_ERROR ("e asm.bits: Cannot set value, no plugins defined yet");
-				ret = true;
-			}
-			// else { R_LOG_ERROR ("Cannot set bits %d to '%s'", bits, h->name); }
-		}
-#endif
 		if (!r_anal_set_bits (core->anal, bits)) {
 			R_LOG_ERROR ("asm.arch: Cannot setup '%d' bits analysis engine", bits);
 			ret = false;
@@ -963,7 +919,8 @@ static bool cb_asmbits(void *user, void *data) {
 	r_debug_set_arch (core->dbg, core->anal->config->arch, bits);
 	const bool load_from_debug = r_config_get_b (core->config, "cfg.debug");
 	if (load_from_debug) {
-		if (core->dbg->current && core->dbg->current->plugin.reg_profile) {
+		RDebugPlugin *plugin = R_UNWRAP3 (core->dbg, current, plugin);
+		if (plugin && plugin->reg_profile) {
 // XXX. that should depend on the plugin, not the host os
 #if R2__WINDOWS__
 #if !defined(_WIN64)
@@ -972,7 +929,7 @@ static bool cb_asmbits(void *user, void *data) {
 			core->dbg->bits = R_SYS_BITS_64;
 #endif
 #endif
-			char *rp = core->dbg->current->plugin.reg_profile (core->dbg);
+			char *rp = plugin->reg_profile (core->dbg);
 			if (rp) {
 				r_reg_set_profile_string (core->dbg->reg, rp);
 				r_reg_set_profile_string (core->anal->reg, rp);
@@ -1680,6 +1637,16 @@ static bool cb_color_getter(void *user, RConfigNode *node) {
 	return true;
 }
 
+static bool cb_reloff(void *user, void *data) {
+	// RCore *core = (RCore *) user;
+	RConfigNode *node = (RConfigNode *) data;
+	if (strchr (node->value, '?')) {
+		r_cons_printf ("func\nflag\nmaps\ndmap\nfmap\nsect\nsymb\nlibs\nfile\n");
+		return false;
+	}
+	return true;
+}
+
 static bool cb_decoff(void *user, void *data) {
 	RCore *core = (RCore *) user;
 	RConfigNode *node = (RConfigNode *) data;
@@ -1882,11 +1849,21 @@ static bool cb_dbgbackend(void *user, void *data) {
 		r_debug_plugin_list (core->dbg, 'q');
 		return false;
 	}
+	// TODO: probably not necessary
 	if (!strcmp (node->value, "bf")) {
-		// hack
 		r_config_set (core->config, "asm.arch", "bf");
 	}
-	r_debug_use (core->dbg, node->value);
+	if (r_debug_use (core->dbg, node->value)) {
+		RDebugPlugin *plugin = R_UNWRAP3 (core->dbg, current, plugin);
+		if (plugin) {
+			const char *name = plugin->meta.name;
+			// cmd_aei (core);
+			free (node->value);
+			node->value = strdup (name);
+		}
+	} else {
+		R_LOG_ERROR ("Cannot find a valid debug plugin");
+	}
 	return true;
 }
 
@@ -2264,7 +2241,7 @@ static bool cb_cmddepth(void *user, void *data) {
 	RCore *core = (RCore *)user;
 	int c = R_MAX (((RConfigNode*)data)->i_value, 0);
 	core->max_cmd_depth = c;
-	core->cons->context->cmd_depth = c;
+	core->cur_cmd_depth = c;
 	return true;
 }
 
@@ -2993,8 +2970,9 @@ static bool cb_searchin(void *user, void *data) {
 	if (*node->value == '?') {
 		if (strlen (node->value) > 1 && node->value[1] == '?') {
 			r_cons_printf ("Valid values for search.in (depends on .from/.to and io.va):\n"
-			"raw                search in raw io (ignoring bounds)\n"
-			"flag               find boundaries on flag in current offset bigger than 1 byte\n"
+			"range              search between .from/.to boundaries\n"
+			"flag               find boundaries in ranges defined by flags larger than 1 byte\n"
+			"flag:[glob]        find boundaries in flags matching given glob and larger than 1 byte\n"
 			"block              search in the current block\n"
 			"io.map             search in current map\n"
 			"io.maps            search in all maps\n"
@@ -3472,10 +3450,9 @@ R_API int r_core_config_init(RCore *core) {
 	SETCB ("anal.limits", "false", (RConfigCallback)&cb_anal_limits, "restrict analysis to address range [anal.from:anal.to]");
 	SETICB ("anal.from", -1, (RConfigCallback)&cb_anal_from, "lower limit on the address range for analysis");
 	SETICB ("anal.to", -1, (RConfigCallback)&cb_anal_from, "upper limit on the address range for analysis");
-	n = NODECB ("anal.in", "io.maps.x", &cb_searchin);
-	// R2_590 - n = NODECB ("anal.in", "io.sections.x", &cb_searchin); // R2R db/anal/calls i think anal.in should change on RCore.fileOpen()
+	n = NODECB ("anal.in", "io.maps.x", &cb_searchin); // TODO: use io.sections.x seems to break db/anal/calls.. why?
 	SETDESC (n, "specify search boundaries for analysis");
-	SETOPTIONS (n, "range", "block",
+	SETOPTIONS (n, "raw", "block",
 		"bin.segment", "bin.segments", "bin.segments.x", "bin.segments.r", "bin.section", "bin.sections", "bin.sections.rwx", "bin.sections.r", "bin.sections.rw", "bin.sections.rx", "bin.sections.wx", "bin.sections.x",
 		"io.map", "io.maps", "io.maps.rwx", "io.maps.r", "io.maps.rw", "io.maps.rx", "io.maps.wx", "io.maps.x",
 		"dbg.stack", "dbg.heap",
@@ -3575,6 +3552,7 @@ R_API int r_core_config_init(RCore *core) {
 #endif
 	SETDESC (n, "choose malloc structure parser");
 	SETOPTIONS (n, "glibc", "jemalloc", NULL);
+	SETPREF ("dbg.glibc.path", "", "if not empty, use the given path to resolve the libc");
 #if __GLIBC_MINOR__ > 25
 	SETBPREF ("dbg.glibc.tcache", "true", "parse the tcache (glibc.minor > 2.25.x)");
 #else
@@ -3713,8 +3691,7 @@ R_API int r_core_config_init(RCore *core) {
 	SETCB ("asm.offset.segment", "false", &cb_segoff, "show segmented address in prompt (x86-16)");
 	SETICB ("asm.offset.segment.bits", 4, &cb_asm_offset_segment_bits, "segment granularity in bits (x86-16)");
 	SETCB ("asm.offset.base10", "false", &cb_decoff, "show address in base 10 instead of hexadecimal");
-	SETBPREF ("asm.offset.relative", "false", "show relative offsets instead of absolute address in disasm");
-	SETBPREF ("asm.offset.flags", "false", "show relative offsets to flags (not only functions)");
+	SETCB ("asm.offset.relto", "", &cb_reloff, "show offset relative to fun,map,sec,flg");
 	SETBPREF ("asm.offset.focus", "false", "show only the addresses that branch or located at the beginning of a basic block");
 	SETBPREF ("asm.section", "false", "show section name before offset");
 	SETBPREF ("asm.section.perm", "false", "show section permissions in the disasm");
@@ -3945,6 +3922,47 @@ R_API int r_core_config_init(RCore *core) {
 	SETI ("stack.size", 64,  "size in bytes of stack hexdump in visual debug");
 	SETI ("stack.delta", 0,  "delta for the stack dump");
 
+	/* cmd */
+	SETCB ("cmd.demangle", "false", &cb_bdc, "run xcrun swift-demangle and similar if available (SLOW)");
+	SETICB ("cmd.depth", 10, &cb_cmddepth, "maximum command depth");
+	SETPREF ("cmd.undo", "true", "stack `uc` undo commands when running some commands like w, af, CC, ..");
+	SETPREF ("cmd.bp", "", "run when a breakpoint is hit");
+	SETPREF ("cmd.onsyscall", "", "run when a syscall is hit");
+	SETICB ("cmd.hitinfo", 1, &cb_debug_hitinfo, "show info when a tracepoint/breakpoint is hit");
+	SETPREF ("cmd.stack", "", "command to display the stack in visual debug mode");
+	SETPREF ("cmd.cprompt", "", "column visual prompt commands");
+	SETPREF ("cmd.gprompt", "", "graph visual prompt commands");
+	SETPREF ("cmd.hit", "", "run when a search hit is found");
+#if R2__UNIX__
+	SETPREF ("cmd.usr1", "", "run when SIGUSR1 signal is received");
+	SETPREF ("cmd.usr2", "", "run when SIGUSR2 signal is received");
+#endif
+	SETPREF ("cmd.open", "", "run when file is opened");
+	SETPREF ("cmd.load", "", "run when binary is loaded");
+	SETPREF ("cmd.bbgraph", "", "show the output of this command in the graph basic blocks");
+	RConfigNode *cmdpdc = NODECB ("cmd.pdc", "", &cb_cmdpdc);
+	SETDESC (cmdpdc, "select pseudo-decompiler command to run after pdc");
+	update_cmdpdc_options (core, cmdpdc);
+	SETCB ("cmd.log", "", &cb_cmdlog, "every time a new T log is added run this command");
+	SETPREF ("cmd.prompt", "", "prompt commands");
+	SETCB ("cmd.repeat", "false", &cb_cmdrepeat, "empty command an alias for '..' (repeat last command)");
+	SETPREF ("cmd.fcn.new", "", "run when new function is analyzed");
+	SETPREF ("cmd.fcn.delete", "", "run when a function is deleted");
+	SETPREF ("cmd.fcn.rename", "", "run when a function is renamed");
+	SETPREF ("cmd.visual", "", "replace current print mode");
+	SETPREF ("cmd.vprompt", "", "commands to run (before) the visual prompt");
+	SETPREF ("cmd.vprompt2", "", "commands to execute (after) the visual prompt");
+	SETPREF ("cmd.step", "", "run command on every debugger step");
+
+	SETCB ("cmd.esil.pin", "", &cb_cmd_esil_pin, "command to execute everytime a pin is hit by the program counter");
+	SETCB ("cmd.esil.step", "", &cb_cmd_esil_step, "command to run before performing a step in the emulator");
+	SETCB ("cmd.esil.stepout", "", &cb_cmd_esil_step_out, "command to run after performing a step in the emulator");
+	SETCB ("cmd.esil.mdev", "", &cb_cmd_esil_mdev, "command to run when memory device address is accessed");
+	SETCB ("cmd.esil.intr", "", &cb_cmd_esil_intr, "command to run when an esil interrupt happens");
+	SETCB ("cmd.esil.trap", "", &cb_cmd_esil_trap, "command to run when an esil trap happens");
+	SETCB ("cmd.esil.todo", "", &cb_cmd_esil_todo, "command to run when the esil instruction contains TODO");
+	SETCB ("cmd.esil.ioer", "", &cb_cmd_esil_ioer, "command to run when esil fails to IO (invalid read/write)");
+
 	SETCB ("dbg.maxsnapsize", "32M", &cb_dbg_maxsnapsize, "dont make snapshots of maps bigger than a specific size");
 	SETCB ("dbg.wrap", "false", &cb_dbg_wrap, "enable the ptrace-wrap abstraction layer (needed for debugging from iaito)");
 	SETCB ("dbg.libs", "", &cb_dbg_libs, "If set stop when loading matching libname");
@@ -4012,45 +4030,6 @@ R_API int r_core_config_init(RCore *core) {
 	SETICB ("dbg.btdepth", 128, &cb_dbgbtdepth, "depth of backtrace");
 
 
-	/* cmd */
-	SETCB ("cmd.demangle", "false", &cb_bdc, "run xcrun swift-demangle and similar if available (SLOW)");
-	SETICB ("cmd.depth", 10, &cb_cmddepth, "maximum command depth");
-	SETPREF ("cmd.undo", "true", "stack `uc` undo commands when running some commands like w, af, CC, ..");
-	SETPREF ("cmd.bp", "", "run when a breakpoint is hit");
-	SETPREF ("cmd.onsyscall", "", "run when a syscall is hit");
-	SETICB ("cmd.hitinfo", 1, &cb_debug_hitinfo, "show info when a tracepoint/breakpoint is hit");
-	SETPREF ("cmd.stack", "", "command to display the stack in visual debug mode");
-	SETPREF ("cmd.cprompt", "", "column visual prompt commands");
-	SETPREF ("cmd.gprompt", "", "graph visual prompt commands");
-	SETPREF ("cmd.hit", "", "run when a search hit is found");
-#if R2__UNIX__
-	SETPREF ("cmd.usr1", "", "run when SIGUSR1 signal is received");
-	SETPREF ("cmd.usr2", "", "run when SIGUSR2 signal is received");
-#endif
-	SETPREF ("cmd.open", "", "run when file is opened");
-	SETPREF ("cmd.load", "", "run when binary is loaded");
-	SETPREF ("cmd.bbgraph", "", "show the output of this command in the graph basic blocks");
-	RConfigNode *cmdpdc = NODECB ("cmd.pdc", "", &cb_cmdpdc);
-	SETDESC (cmdpdc, "select pseudo-decompiler command to run after pdc");
-	update_cmdpdc_options (core, cmdpdc);
-	SETCB ("cmd.log", "", &cb_cmdlog, "every time a new T log is added run this command");
-	SETPREF ("cmd.prompt", "", "prompt commands");
-	SETCB ("cmd.repeat", "false", &cb_cmdrepeat, "empty command an alias for '..' (repeat last command)");
-	SETPREF ("cmd.fcn.new", "", "run when new function is analyzed");
-	SETPREF ("cmd.fcn.delete", "", "run when a function is deleted");
-	SETPREF ("cmd.fcn.rename", "", "run when a function is renamed");
-	SETPREF ("cmd.visual", "", "replace current print mode");
-	SETPREF ("cmd.vprompt", "", "visual prompt commands");
-	SETPREF ("cmd.step", "", "run command on every debugger step");
-
-	SETCB ("cmd.esil.pin", "", &cb_cmd_esil_pin, "command to execute everytime a pin is hit by the program counter");
-	SETCB ("cmd.esil.step", "", &cb_cmd_esil_step, "command to run before performing a step in the emulator");
-	SETCB ("cmd.esil.stepout", "", &cb_cmd_esil_step_out, "command to run after performing a step in the emulator");
-	SETCB ("cmd.esil.mdev", "", &cb_cmd_esil_mdev, "command to run when memory device address is accessed");
-	SETCB ("cmd.esil.intr", "", &cb_cmd_esil_intr, "command to run when an esil interrupt happens");
-	SETCB ("cmd.esil.trap", "", &cb_cmd_esil_trap, "command to run when an esil trap happens");
-	SETCB ("cmd.esil.todo", "", &cb_cmd_esil_todo, "command to run when the esil instruction contains TODO");
-	SETCB ("cmd.esil.ioer", "", &cb_cmd_esil_ioer, "command to run when esil fails to IO (invalid read/write)");
 
 	/* filesystem */
 	n = NODECB ("fs.view", "normal", &cb_fsview);
@@ -4315,6 +4294,7 @@ R_API int r_core_config_init(RCore *core) {
 	SETCB ("scr.utf8", r_str_bool (r_cons_is_utf8()), &cb_utf8, "show UTF-8 characters instead of ANSI");
 	SETCB ("scr.utf8.curvy", "false", &cb_utf8_curvy, "show curved UTF-8 corners (requires scr.utf8)");
 	SETCB ("scr.demo", "false", &cb_scr_demo, "use demoscene effects if available");
+	SETPREF ("scr.analbar", "false", "show progressbar for aaa instead of logging what its doing");
 	SETCB ("scr.hist.block", "true", &cb_scr_histblock, "use blocks for histogram");
 	SETCB ("scr.hist.filter", "true", &cb_scr_histfilter, "filter history for matching lines when using up/down keys");
 #if __EMSCRIPTEN__ || __wasi__
@@ -4347,7 +4327,7 @@ R_API int r_core_config_init(RCore *core) {
 	SETI ("search.from", -1, "search start address");
 	n = NODECB ("search.in", "io.maps", &cb_searchin);
 	SETDESC (n, "specify search boundaries");
-	SETOPTIONS (n, "raw", "flag", "block",
+	SETOPTIONS (n, "raw", "flag", "flag:", "block",
 		"bin.section", "bin.sections", "bin.sections.rwx", "bin.sections.r", "bin.sections.rw", "bin.sections.rx", "bin.sections.wx", "bin.sections.x",
 		"io.map", "io.maps", "io.maps.rwx", "io.maps.r", "io.maps.rw", "io.maps.rx", "io.maps.wx", "io.maps.x",
 		"dbg.stack", "dbg.heap",

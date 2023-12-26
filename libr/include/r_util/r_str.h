@@ -3,6 +3,7 @@
 
 #include "r_str_util.h"
 #include <r_list.h>
+#include <r_vec.h>
 #include <r_types_base.h>
 #include <stdarg.h>
 #include <wchar.h>
@@ -29,12 +30,22 @@ typedef struct {
 	bool weak;
 } RString;
 
+// string split using rvec
+typedef struct {
+	ut16 from;
+	ut16 to;
+} RStringSlice;
+
+R_VEC_TYPE (RVecStringSlice, RStringSlice);
+
+
 typedef int (*RStrRangeCallback) (void *, int);
 
 // can be replaced with RString
 #define r_strf_buffer(s) char strbuf[s]
-#define r_strf_var(n,s, f, ...) char n[s]; snprintf (n, s, f, __VA_ARGS__);
-#define r_strf(s,...) (snprintf (strbuf, sizeof (strbuf), s, __VA_ARGS__)?strbuf: strbuf)
+#define r_strf_var(n,s,f, ...) char n[s]; snprintf (n, s, f, __VA_ARGS__);
+#define r_strf(s,...) (snprintf (strbuf, sizeof (strbuf), s, __VA_ARGS__)? strbuf: strbuf)
+#define r_str_var(n,s,f) char n[s]; r_str_ncpy (n, f, s);
 
 typedef struct r_charset_rune_t {
 	ut8 *ch;
@@ -96,7 +107,6 @@ R_API void r_str_filter_zeroline(char *str, int len);
 R_API size_t r_str_utf8_codepoint(const char *s, size_t left);
 R_API bool r_str_char_fullwidth(const char *s, size_t left);
 R_API int r_str_write(int fd, const char *b);
-R_API size_t r_str_ncpy(char *dst, const char *src, size_t n);
 R_API void r_str_sanitize(char *c);
 R_API char *r_str_sanitize_sdb_key(const char *s);
 R_API const char *r_str_casestr(const char *a, const char *b);
@@ -104,6 +114,9 @@ R_API const char *r_str_firstbut(const char *s, char ch, const char *but);
 R_API const char *r_str_firstbut_escape(const char *s, char ch, const char *but);
 R_API const char *r_str_lastbut(const char *s, char ch, const char *but);
 R_API int r_str_split(char *str, char ch);
+R_API char *r_str_slice(const char *str, RStringSlice s);
+
+R_API RVecStringSlice *r_str_split_vec(const char *str, const char *c, int n);
 R_API RList *r_str_split_list(char *str, const char *c, int n);
 R_API RList *r_str_split_duplist(const char *str, const char *c, bool trim);
 R_API size_t *r_str_split_lines(char *str, size_t *count);
@@ -169,6 +182,7 @@ R_API void r_str_trim_emptylines(char *str);
 R_API int r_str_ntrim(char *str, int n);
 R_API char *r_str_wrap(const char *str, int w);
 R_API char *r_str_trim_dup(const char *str);
+R_API char *r_str_trim_ndup(const char *str, size_t n);
 R_API char *r_str_trim_lines(char *str);
 R_API void r_str_trim_head(char *str);
 R_API const char *r_str_trim_head_ro(const char *str);
@@ -252,16 +266,27 @@ R_API void r_str_trim_path(char *s);
 R_API ut8 r_str_contains_macro(const char *input_value);
 R_API void r_str_truncate_cmd(char *string);
 R_API bool r_str_glob(const char *str, const char *glob);
-R_API int r_str_binstr2bin(const char *str, ut8 *out, int outlen);
 R_API char *r_str_between(const char *str, const char *prefix, const char *suffix);
 #undef r_str_startswith
+static inline size_t r_str_ncpy(char *dst, const char *src, size_t n) {
+	size_t i;
+
+	// do not do anything if n is 0
+	if (n == 0) {
+		return 0;
+	}
+
+	n--;
+	for (i = 0; src[i] && n > 0; i++, n--) {
+		dst[i] = src[i];
+	}
+	dst[i] = 0;
+	return i;
+}
 R_API bool r_str_startswith(const char *str, const char *needle);
-R_UNUSED static bool r_str_startswith_inline(const char *str, const char *needle) {
+R_UNUSED static inline bool r_str_startswith_inline(const char *str, const char *needle) {
 	if (!str || !needle) {
 		return false;
-	}
-	if (str == needle) {
-		return true;
 	}
 	return !strncmp (str, needle, strlen (needle));
 }

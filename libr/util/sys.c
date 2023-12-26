@@ -24,6 +24,8 @@
 #if defined(__HAIKU__)
 # include <kernel/image.h>
 # include <sys/param.h>
+extern int backtrace(void**, size_t);
+extern int backtrace_symbols_fd(void**, size_t, int);
 #endif
 #include <sys/types.h>
 #include <r_types.h>
@@ -171,6 +173,7 @@ R_API int r_sys_sigaction(int *sig, void(*handler)(int)) {
 }
 #elif HAVE_SIGACTION
 R_API int r_sys_sigaction(int *sig, void(*handler)(int)) {
+#if WANT_DEBUGSTUFF
 	struct sigaction sigact = { };
 	int ret, i;
 	if (unsignable) {
@@ -195,6 +198,7 @@ R_API int r_sys_sigaction(int *sig, void(*handler)(int)) {
 			return ret;
 		}
 	}
+#endif
 	return 0;
 }
 #else
@@ -330,6 +334,7 @@ R_API ut8 *r_sys_unxz(const ut8 *buf, size_t len, size_t *olen) {
 #endif
 
 R_API void r_sys_backtrace(void) {
+#if WANT_DEBUGSTUFF
 #ifdef HAVE_BACKTRACE
 	void *array[10];
 	size_t size = backtrace (array, 10);
@@ -354,6 +359,7 @@ R_API void r_sys_backtrace(void) {
 	}
 #else
 #pragma message ("TODO: r_sys_bt : unimplemented")
+#endif
 #endif
 }
 
@@ -446,6 +452,7 @@ R_API int r_sys_setenv(const char *key, const char *value) {
 #endif
 }
 
+#if WANT_DEBUGSTUFF
 #if R2__UNIX__
 static char *crash_handler_cmd = NULL;
 
@@ -481,7 +488,7 @@ static int checkcmd(const char *c) {
 }
 #endif
 
-R_API int r_sys_crash_handler(const char *cmd) {
+R_API bool r_sys_crash_handler(const char *cmd) {
 #ifndef R2__WINDOWS__
 	int sig[] = { SIGINT, SIGSEGV, SIGBUS, SIGQUIT, SIGHUP, 0 };
 	if (!checkcmd (cmd)) {
@@ -500,6 +507,10 @@ R_API int r_sys_crash_handler(const char *cmd) {
 #endif
 	return true;
 }
+#else
+R_API bool r_sys_crash_handler(const char *cmd) {
+	return true;
+#endif
 
 R_API char *r_sys_getenv(const char *key) {
 #if R2__WINDOWS__
@@ -550,6 +561,14 @@ R_API bool r_sys_getenv_asbool(const char *key) {
 	r_return_val_if_fail (key, false);
 	char *env = r_sys_getenv (key);
 	const bool res = env && r_str_is_true (env);
+	free (env);
+	return res;
+}
+
+R_API ut64 r_sys_getenv_asut64(const char *key) {
+	r_return_val_if_fail (key, false);
+	char *env = r_sys_getenv (key);
+	const ut64 res = env? r_num_math (NULL, env): 0;
 	free (env);
 	return res;
 }
@@ -850,6 +869,7 @@ R_API int r_sys_cmd(const char *str) {
 	if (r_sandbox_enable (0)) {
 		return false;
 	}
+	// setvbuf (stdout, NULL, _IONBF, 0);
 	return r_sandbox_system (str, 1);
 }
 
@@ -1012,14 +1032,13 @@ R_API int r_sys_run(const ut8 *buf, int len) {
 	if (pdelta) {
 		ptr += (4096 - pdelta);
 	}
-	if (!ptr || !buf) {
+	if (!p || !ptr || !buf) {
 		R_LOG_ERROR ("Cannot run empty buffer");
 		free (p);
 		return false;
 	}
 	memcpy (ptr, buf, len);
-	r_mem_protect (ptr, sz, "rx");
-	//r_mem_protect (ptr, sz, "rwx"); // try, ignore if fail
+	r_mem_protect (ptr, sz, "rx"); // rwx ?
 	cb = (int (*)())ptr;
 #if USE_FORK
 	int pid = r_sys_fork ();
@@ -1034,7 +1053,7 @@ R_API int r_sys_run(const ut8 *buf, int len) {
 	int st = 0;
 	waitpid (pid, &st, 0);
 	if (WIFSIGNALED (st)) {
-		int num = WTERMSIG(st);
+		const int num = WTERMSIG (st);
 		R_LOG_INFO ("Child process received signal %d", num);
 		ret = num;
 	} else {
@@ -1057,7 +1076,6 @@ R_API int r_sys_run_rop(const ut8 *buf, int len) {
 		R_LOG_ERROR ("Cannot allocate %d byte buffer", len);
 		return false;
 	}
-
 	if (!buf) {
 		R_LOG_ERROR ("Cannot execute empty rop chain");
 		free (bufptr);
@@ -1203,18 +1221,17 @@ R_API char *r_sys_pid_to_path(int pid) {
 	return strdup (pathbuf);
 #endif
 #else
-	int ret;
 #if __FreeBSD__ || __DragonFly__
 	char pathbuf[PATH_MAX];
 	size_t pathbufl = sizeof (pathbuf);
 	int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, pid};
-	ret = sysctl (mib, 4, pathbuf, &pathbufl, NULL, 0);
+	int ret = sysctl (mib, 4, pathbuf, &pathbufl, NULL, 0);
 	if (ret != 0) {
 		return NULL;
 	}
 #elif __HAIKU__
 	char pathbuf[MAXPATHLEN];
-	int32_t group = 0;
+	int32 group = 0;
 	image_info ii;
 
 	while (get_next_image_info ((team_id)pid, &group, &ii) == B_OK) {
@@ -1231,7 +1248,7 @@ R_API char *r_sys_pid_to_path(int pid) {
 #else
 	char buf[128], pathbuf[1024];
 	snprintf (buf, sizeof (buf), "/proc/%d/exe", pid);
-	ret = readlink (buf, pathbuf, sizeof (pathbuf)-1);
+	int ret = readlink (buf, pathbuf, sizeof (pathbuf)-1);
 	if (ret < 1) {
 		return NULL;
 	}

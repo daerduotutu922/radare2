@@ -72,7 +72,9 @@ typedef int (*RConsGetCursor)(int *rows);
 typedef bool (*RConsIsBreaked)(void);
 typedef void (*RConsFlush)(void);
 typedef void (*RConsGrepCallback)(const char *grep);
+#ifndef R2_BIND_H
 typedef const char * const RCoreHelpMessage[];
+#endif
 
 typedef struct r_cons_bind_t {
 	RConsGetSize get_size;
@@ -116,6 +118,7 @@ typedef struct r_cons_grep_t {
 	int range_line;
 	int line;
 	int sort;
+	int sort_uniq;
 	int sort_row;
 	bool sort_invert;
 	int f_line; //first line
@@ -420,8 +423,8 @@ typedef struct r_cons_context_t {
 	RStack *break_stack;
 	RConsEvent event_interrupt;
 	void *event_interrupt_data;
-	int cmd_depth;
-	int cmd_str_depth;
+	// int cmd_depth;
+	int cmd_str_depth; // wtf ?
 	bool noflush;
 
 	// Used for per-task logging redirection
@@ -961,7 +964,7 @@ R_API void r_cons_pal_update_event(void);
 R_API void r_cons_pal_free(RConsContext *ctx);
 R_API void r_cons_pal_init(RConsContext *ctx);
 R_API void r_cons_pal_copy(RConsContext *dst, RConsContext *src);
-R_API char *r_cons_pal_parse(const char *str, RColor *outcol);
+R_API R_MUSTUSE char *r_cons_pal_parse(const char *str, RColor *outcol);
 R_API void r_cons_pal_random(void);
 R_API RColor r_cons_pal_get(const char *key);
 R_API RColor r_cons_pal_get_i(int index);

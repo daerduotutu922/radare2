@@ -1,14 +1,13 @@
 /* radare - LGPL - Copyright 2009-2023 - pancake */
 
 #define R_LOG_ORIGIN "cfile"
+
 #include <r_core.h>
-#include <stdlib.h>
-#include <string.h>
 
 #define UPDATE_TIME(a) (r->times->file_open_time = r_time_now_mono () - (a))
 
-static int r_core_file_do_load_for_debug(RCore *r, ut64 loadaddr, const char *filenameuri);
-static int r_core_file_do_load_for_io_plugin(RCore *r, ut64 baseaddr, ut64 loadaddr);
+static int r_core_file_load_for_debug(RCore *r, ut64 loadaddr, const char *filenameuri);
+static int r_core_file_load_for_io_plugin(RCore *r, ut64 baseaddr, ut64 loadaddr);
 
 static bool close_but_cb(void *user, void *data, ut32 id) {
 	RCore *core = (RCore *)user;
@@ -101,10 +100,10 @@ R_API bool r_core_file_reopen(RCore *core, const char *args, int perm, int loadb
 			r_debug_continue (core->dbg);
 		} while (!r_debug_is_dead (core->dbg));
 		r_debug_detach (core->dbg, core->dbg->pid);
-		perm = 7;
+		perm = R_PERM_RWX;
 	} else {
 		if (!perm) {
-			perm = 4; //R_PERM_R;
+			perm = R_PERM_R; // 4
 		}
 	}
 	if (!ofilepath) {
@@ -259,7 +258,7 @@ R_API char *r_core_sysenv_begin(RCore *core, const char *cmd) {
 	r_sys_setenv ("R2PM_LEGACY", "0");
 	r_sys_setenv ("R2_OFFSET", r_strf ("%"PFMT64d, core->offset));
 	r_sys_setenv ("R2_XOFFSET", r_strf ("0x%08"PFMT64x, core->offset));
-	r_sys_setenv ("R2_ENDIAN", R_ARCH_CONFIG_IS_BIG_ENDIAN (core->rasm->config)? "big": "little");	//XXX
+	r_sys_setenv ("R2_ENDIAN", R_ARCH_CONFIG_IS_BIG_ENDIAN (core->rasm->config)? "big": "little");	// XXX
 	r_sys_setenv ("R2_BSIZE", r_strf ("%d", core->blocksize));
 #if 0
 	// dump current config file so other r2 tools can use the same options
@@ -350,15 +349,19 @@ static bool setbpint(RCore *r, const char *mode, const char *sym) {
 #endif
 
 // XXX - need to handle index selection during debugging
-static int r_core_file_do_load_for_debug(RCore *r, ut64 baseaddr, R_NULLABLE const char *filenameuri) {
+static int r_core_file_load_for_debug(RCore *r, ut64 baseaddr, R_NULLABLE const char *filenameuri) {
 	RIODesc *desc = r->io->desc;
 	RBinFile *binfile = NULL;
 	RBinPlugin *plugin;
 	int xtr_idx = 0; // if 0, load all if xtr is used
 
 	// TODO : Honor file.path eval var too?
-	if (filenameuri && r_str_startswith (filenameuri, "dbg://")) {
-		filenameuri += 6;
+	if (filenameuri) {
+		if (r_str_startswith (filenameuri, "dbg://")) {
+			filenameuri += 6;
+		} else if (r_str_startswith (filenameuri, "sysgdb://")) {
+			filenameuri += 9;
+		}
 	}
 	if (!desc) {
 		return false;
@@ -424,7 +427,7 @@ static int r_core_file_do_load_for_debug(RCore *r, ut64 baseaddr, R_NULLABLE con
 	return true;
 }
 
-static int r_core_file_do_load_for_io_plugin(RCore *r, ut64 baseaddr, ut64 loadaddr) {
+static int r_core_file_load_for_io_plugin(RCore *r, ut64 baseaddr, ut64 loadaddr) {
 	RIODesc *cd = r->io->desc;
 	int fd = cd ? cd->fd : -1;
 	int xtr_idx = 0; // if 0, load all if xtr is used
@@ -604,7 +607,8 @@ static bool linkcb(void *user, void *data, ut32 id) {
 		RBinSymbol *sym;
 		RVecRBinSymbol *symbols = r_bin_file_get_symbols_vec (bf);
 		R_VEC_FOREACH (symbols, sym) {
-			if (!strcmp (sym->name, ld->name)) {
+			const char *sname = r_bin_name_tostring (sym->name);
+			if (!strcmp (sname, ld->name)) {
 				ld->addr = sym->vaddr;
 				return false;
 			}
@@ -636,6 +640,10 @@ R_API bool r_core_bin_load(RCore *r, const char *filenameuri, ut64 baddr) {
 	bool is_io_load = false;
 	if (desc && desc->plugin) {
 		is_io_load = true;
+		if (r_str_startswith (filenameuri, "frida://")) {
+			// dont try to guess the bin file in the address 0 if we are using r2frida
+			is_io_load = false;
+		}
 	//	r_io_use_fd (r->io, desc->fd);
 	}
 	r->bin->minstrlen = r_config_get_i (r->config, "bin.str.min");
@@ -645,12 +653,15 @@ R_API bool r_core_bin_load(RCore *r, const char *filenameuri, ut64 baddr) {
 		// TODO? necessary to restore the desc back?
 		// Fix to select pid before trying to load the binary
 		if ((desc->plugin && desc->plugin->isdbg) || r_config_get_b (r->config, "cfg.debug")) {
-			r_core_file_do_load_for_debug (r, baddr, filenameuri);
+			r_core_file_load_for_debug (r, baddr, filenameuri);
 		} else {
-			r_core_file_do_load_for_io_plugin (r, baddr, 0LL);
+			r_core_file_load_for_io_plugin (r, baddr, 0LL);
 		}
 		r_io_use_fd (r->io, desc->fd);
 		// Restore original desc
+	} else if (desc != NULL) {
+		r_io_use_fd (r->io, desc->fd);
+		r_io_map_add (r->io, desc->fd, R_PERM_RWX, 0LL, 0, r_io_desc_size (desc));
 	}
 	if (binfile && desc) {
 		binfile->fd = desc->fd;
@@ -748,16 +759,17 @@ R_API bool r_core_bin_load(RCore *r, const char *filenameuri, ut64 baddr) {
 		const RList *imports = r_bin_get_imports (r->bin);
 		r_list_foreach (imports, iter, imp) {
 			// PLT finding
-			char *flagname = r_str_newf ("sym.imp.%s", imp->name);
+			char *flagname = r_str_newf ("sym.imp.%s", r_bin_name_tostring2 (imp->name, 'f'));
 			RFlagItem *impsym = r_flag_get (r->flags, flagname);
 			free (flagname);
 			if (!impsym) {
-				//R_LOG_ERROR ("Cannot find '%s' import in the PLT", imp->name);
+				// R_LOG_ERROR ("Cannot find '%s' import in the PLT", imp->name);
 				continue;
 			}
 			ut64 imp_addr = impsym->offset;
-			eprintf ("Resolving %s... ", imp->name);
-			RCoreLinkData linkdata = {imp->name, UT64_MAX, r->bin};
+			const char *imp_name = r_bin_name_tostring2 (imp->name, 'o');
+			eprintf ("Resolving %s... ", imp_name);
+			RCoreLinkData linkdata = {imp_name, UT64_MAX, r->bin};
 			r_id_storage_foreach (r->io->files, linkcb, &linkdata);
 			if (linkdata.addr != UT64_MAX) {
 				eprintf ("0x%08"PFMT64x, linkdata.addr);
@@ -767,10 +779,18 @@ R_API bool r_core_bin_load(RCore *r, const char *filenameuri, ut64 baddr) {
 			}
 		}
 	}
-
-	//If type == R_BIN_TYPE_CORE, we need to create all the maps
-	if (plugin && binfile && plugin->file_type && plugin->file_type (binfile) == R_BIN_TYPE_CORE) {
-		ut64 sp_addr = (ut64)-1;
+	bool is_core = false;
+	if (plugin && plugin->info) {
+		RBinInfo *info = plugin->info (binfile);
+		if (info && info->type) {
+			is_core = strstr (info->type, "CORE");
+		}
+		r_bin_info_free (info);
+	}
+	// the bintypecore is a wrong callback that is used only by ELF and must be deprecated. info should be in RBinInfo instead
+	// if type == R_BIN_TYPE_CORE, we need to create all the maps
+	if (plugin && binfile && is_core) {
+		ut64 sp_addr = UT64_MAX;
 		RIOMap *stack_map = NULL;
 		// Setting the right arch and bits, so regstate will be shown correctly
 		if (plugin->info) {
@@ -927,10 +947,8 @@ R_API RIODesc *r_core_file_open(RCore *r, const char *file, int flags, ut64 load
 
 	r_esil_setup (r->anal->esil, r->anal, 0, 0, false);
 	if (r_config_get_b (r->config, "cfg.debug")) {
-		bool swstep = true;
-		if (r->dbg->current && r->dbg->current->plugin.canstep) {
-			swstep = false;
-		}
+		RDebugPlugin *plugin = R_UNWRAP3 (r->dbg, current, plugin);
+		const bool swstep = (plugin && plugin->canstep)? false: true;
 		r_config_set_b (r->config, "dbg.swstep", swstep);
 		// Set the correct debug handle
 		if (fd->plugin && fd->plugin->isdbg) {

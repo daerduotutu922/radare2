@@ -86,8 +86,8 @@ static bool load(RBinFile *bf, RBuffer *buf, ut64 loadaddr) {
 
 static void destroy(RBinFile *bf) {
 	AvrPriv *ap = (AvrPriv*)(bf->bo->bin_obj);
-	r_buf_free (ap->b);
-	R_FREE (bf->bo->bin_obj);
+	// r_buf_free (ap->b); // this is freed by RBinFile.free()
+	free (ap);
 }
 
 static RBinInfo* info(RBinFile *bf) {
@@ -126,9 +126,10 @@ static RList* entries(RBinFile *bf) {
 }
 
 static void addsym(RList *ret, const char *name, ut64 addr) {
+	R_RETURN_IF_FAIL (ret && name);
 	RBinSymbol *ptr = R_NEW0 (RBinSymbol);
-	if (ptr) {
-		ptr->name = strdup (r_str_get (name));
+	if (R_LIKELY (ptr)) {
+		ptr->name = r_bin_name_new (name);
 		ptr->paddr = ptr->vaddr = addr;
 		ptr->size = 0;
 		ptr->ordinal = 0;

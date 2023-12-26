@@ -906,7 +906,7 @@ static char *get_unique_name(Sdb *sdb, const char *name, const RSpace *sp) {
 	ut32 i;
 	for (i = 2; i < UT32_MAX; i++) {
 		char *unique = r_str_newf ("%s_%d", name, i);
-		if (!unique || !name_exists (sdb, unique, sp)) {
+		if (!name_exists (sdb, unique, sp)) {
 			return unique;
 		}
 		free (unique);
@@ -1415,7 +1415,7 @@ R_API RList *r_sign_find_closest_fcn(RAnal *a, RSignItem *it, int count, double 
 			r_sign_addto_item (a, fsig, fcn, R_SIGN_GRAPH);
 		}
 		r_sign_addto_item (a, fsig, fcn, R_SIGN_OFFSET);
-		fsig->name = r_str_new (fcn->name);
+		fsig->name = strdup (fcn->name);
 
 		// maybe add signature item to output list
 		closest_match_update (fsig, &data);
@@ -2965,7 +2965,6 @@ enum {
 };
 
 static int signdb_type(const char *file) {
-	char *data = NULL;
 	if (r_str_endswith (file, ".sdb")) {
 		return SIGNDB_TYPE_SDB;
 	}
@@ -2979,45 +2978,39 @@ static int signdb_type(const char *file) {
 		return SIGNDB_TYPE_R2;
 	}
 	int i, sz = 0;
-	data = r_file_slurp_range (file, 0, 0x200, &sz);
-	if (!data || sz < 1) {
+	char *data = r_file_slurp_range (file, 0, 0x200, &sz);
+	if (!data) {
 		return SIGNDB_TYPE_INVALID;
 	}
+	if (sz < 1) {
+		free (data);
+		return SIGNDB_TYPE_INVALID;
+	}
+	data[sz - 1] = 0;
 	sz = R_MIN (sz, 0x200);
 	int is_sdb = 16;
 	int is_kv = 4;
-	int is_r2 = 4;
+	int is_r2 = 2;
 	int t = SIGNDB_TYPE_INVALID;
 	if (r_str_startswith (data, "[{\"name\":")) {
 		t = SIGNDB_TYPE_JSON;
 	} else {
 		for (i = 0; i < sz; i++) {
-			if (!strncmp (data + i, "\nza ", sz - i)) {
+			if (!strncmp (data + i, "\nza ", 4)) {
 				is_r2--;
-				i++;
+				i += 3;
 				continue;
 			}
-			switch (i) {
-			case 3:
-			case 7:
-			case 0xb:
-			case 0xf:
-				if (data[i] == 0) {
-					is_sdb--;
-				}
-				break;
-			case '=':
-			case '\n':
+			if ((i & 3) == 3 && data[i] == 0) {
+				is_sdb--;
+				continue;
+			}
+			if (data[i] == '=' || data[i] == '\n') {
 				is_kv--;
-				break;
-			default:
-				if (data[i] != 0) {
-					is_sdb--;
-				}
-				break;
+				continue;
 			}
 		}
-		if (is_sdb == 0) {
+		if (is_sdb < 0) {
 			t = SIGNDB_TYPE_SDB;
 		} else if (is_r2 < 0) {
 			t = SIGNDB_TYPE_R2;
@@ -3034,7 +3027,7 @@ static int signdb_type(const char *file) {
 }
 
 static bool sign_load_r2(RAnal *a, const char *path) {
-	char *cmd = r_str_newf (". %s", path);
+	char *cmd = r_str_newf ("'. %s", path);
 	a->coreb.cmd (a->coreb.core, cmd);
 	free (cmd);
 	return true;

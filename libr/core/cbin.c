@@ -5,8 +5,8 @@
 
 #define is_in_range(at, from, sz) ((at) >= (from) && (at) < ((from) + (sz)))
 
-#define VA_FALSE    0
-#define VA_TRUE     1
+#define VA_FALSE 0
+#define VA_TRUE 1
 #define VA_NOREBASE 2
 
 #define LOAD_BSS_MALLOC 0
@@ -20,15 +20,12 @@
 #define IS_MODE_NORMAL(mode) (!(mode))
 #define IS_MODE_CLASSDUMP(mode) ((mode) & R_MODE_CLASSDUMP)
 
-// dup from cmd_info
-#define PAIR_WIDTH "9"
-
 static R_TH_LOCAL int old_bits = -1;
 static R_TH_LOCAL char *old_arch = NULL;
 
 static void pair(const char *key, const char *val) {
 	if (R_STR_ISNOTEMPTY (val)) {
-		r_cons_printf ("%-"PAIR_WIDTH"s%s\n", key, val);
+		r_cons_printf ("%-9s%s\n", key, val);
 	}
 }
 
@@ -38,6 +35,19 @@ static void pair_bool(PJ *pj, const char *key, bool val) {
 	} else {
 		pair (key, r_str_bool (val));
 	}
+}
+
+static char *csv_supers(RList *supers) {
+	RBinName *bn;
+	RListIter *iter;
+	RStrBuf *sb = r_strbuf_new ("");
+	r_list_foreach (supers, iter, bn) {
+		if (!r_strbuf_is_empty (sb)) {
+			r_strbuf_append (sb, ", ");
+		}
+		r_strbuf_append (sb, r_bin_name_tostring (bn));
+	}
+	return r_strbuf_drain (sb);
 }
 
 static void pair_int(PJ *pj, const char *key, int val) {
@@ -704,15 +714,17 @@ R_API void r_core_anal_type_init(RCore *core) {
 }
 
 R_API void r_core_anal_cc_init(RCore *core) {
+	r_return_if_fail (core);
 	char *anal_arch = strdup (r_config_get (core->config, "anal.arch"));
-	const int bits = core->anal->config->bits;
+	if (anal_arch && !strcmp (anal_arch, "r2ghidra")) {
+		free (anal_arch);
+		anal_arch = strdup (r_config_get (core->config, "asm.cpu"));
+	}
 	if (!anal_arch) {
 		return;
 	}
-	char *dot = strchr (anal_arch, '.');
-	if (dot) {
-		*dot = 0;
-	}
+	const int bits = core->anal->config->bits;
+	r_str_after (anal_arch, '.');
 	if (old_bits != -1) {
 		if (old_bits == bits) {
 			if (!strcmp (old_arch, anal_arch)) {
@@ -1425,7 +1437,10 @@ static bool bin_entry(RCore *r, PJ *pj, int mode, ut64 laddr, int va, bool inifi
 	ut64 baddr = r_bin_get_baddr (r->bin);
 
 	if (IS_MODE_RAD (mode)) {
-		r_cons_printf ("fs symbols\n");
+		if (r_list_empty (entries)) {
+			return true;
+		}
+		r_cons_printf ("fs+symbols\n");
 	} else if (IS_MODE_JSON (mode)) {
 		pj_a (pj);
 	} else if (IS_MODE_NORMAL (mode)) {
@@ -1544,6 +1559,8 @@ static bool bin_entry(RCore *r, PJ *pj, int mode, ut64 laddr, int va, bool inifi
 			ut64 at = rva (r->bin, entry->paddr, entry->vaddr, va);
 			r_core_seek (r, at, false);
 		}
+	} else if (IS_MODE_RAD (mode)) {
+		r_cons_printf ("fs-\n");
 	} else if (IS_MODE_JSON (mode)) {
 		pj_end (pj);
 	} else if (IS_MODE_NORMAL (mode)) {
@@ -1590,7 +1607,12 @@ static char *resolveModuleOrdinal(Sdb *sdb, const char *module, int ordinal) {
 	r_strf_buffer(64);
 	Sdb *db = sdb;
 	char *foo = sdb_get (db, r_strf ("%d", ordinal), 0);
-	return (foo && *foo) ? foo : NULL;
+	if (foo) {
+		if (!*foo) {
+			R_FREE (foo);
+		}
+	}
+	return foo;
 }
 
 // name can be optionally used to explicitly set the used base name (for example for demangling), otherwise the import name will be used.
@@ -1607,10 +1629,10 @@ static char *construct_reloc_name(R_NONNULL RBinReloc *reloc, R_NULLABLE const c
 	// actual name
 	if (name) {
 		r_strbuf_append (buf, name);
-	} else if (reloc->import && R_STR_ISNOTEMPTY (reloc->import->name)) {
-		r_strbuf_append (buf, reloc->import->name);
-	} else if (reloc->symbol && R_STR_ISNOTEMPTY (reloc->symbol->name)) {
-		r_strbuf_appendf (buf, "%s", reloc->symbol->name);
+	} else if (reloc->import) {
+		r_strbuf_append (buf, r_bin_name_tostring (reloc->import->name));
+	} else if (reloc->symbol) {
+		r_strbuf_append (buf, r_bin_name_tostring (reloc->symbol->name));
 	} else if (reloc->is_ifunc) {
 		// addend is the function pointer for the resolving ifunc
 		r_strbuf_appendf (buf, "ifunc_%"PFMT64x, reloc->addend);
@@ -1618,7 +1640,6 @@ static char *construct_reloc_name(R_NONNULL RBinReloc *reloc, R_NULLABLE const c
 		// TODO(eddyb) implement constant relocs.
 		r_strbuf_set (buf, "");
 	}
-
 	return r_strbuf_drain (buf);
 }
 
@@ -1647,8 +1668,8 @@ static void set_bin_relocs(RelocInfo *ri, RBinReloc *reloc, ut64 addr, Sdb **db,
 	RCore *r = ri->core;
 	r_strf_buffer (64);
 
-	if (ri->is_pe && reloc->import && reloc->import->name && reloc->import->libname
-			&& r_str_startswith (reloc->import->name, "Ordinal_")) {
+	const char *name = reloc->import? r_bin_name_tostring (reloc->import->name): NULL;
+	if (ri->is_pe && name && reloc->import->libname && r_str_startswith (name, "Ordinal_")) {
 		char *module = strdup (reloc->import->libname);
 		r_str_case (module, false);
 
@@ -1658,7 +1679,7 @@ static void set_bin_relocs(RelocInfo *ri, RBinReloc *reloc, ut64 addr, Sdb **db,
 			module[module_len - 4] = '\0';
 		}
 
-		const char *import = reloc->import->name + strlen ("Ordinal_");
+		const char *import = name + strlen ("Ordinal_");
 		if (import) {
 			char *filename = NULL;
 			int ordinal = atoi (import);
@@ -1684,13 +1705,15 @@ static void set_bin_relocs(RelocInfo *ri, RBinReloc *reloc, ut64 addr, Sdb **db,
 				// ordinal-1 because we enumerate starting at 0
 				char *symname = resolveModuleOrdinal (*db, module, ordinal - 1);  // uses sdb_get
 				if (symname) {
+					char *s;
 					if (r->bin->prefix) {
-						reloc->import->name = r_str_newf
-							("%s.%s", r->bin->prefix, symname);
+						s = r_str_newf ("%s.%s", r->bin->prefix, symname);
 						R_FREE (symname);
 					} else {
-						reloc->import->name = symname;
+						s = symname;
 					}
+					r_bin_name_demangled (reloc->import->name, s);
+					free (s);
 				}
 			}
 		}
@@ -1761,28 +1784,25 @@ static void add_metadata(RCore *r, RBinReloc *reloc, ut64 addr, int mode) {
 	}
 }
 
-static bool is_section_symbol(RBinSymbol *s) {
+static inline bool is_section_symbol(RBinSymbol *s) {
 	/* workaround for some bin plugs (e.g. ELF) */
-	if (!s || *s->name) {
-		return false;
-	}
-	return (s->type && !strcmp (s->type, R_BIN_TYPE_SECTION_STR));
+	return (s && s->type && !strcmp (s->type, R_BIN_TYPE_SECTION_STR));
 }
 
-static bool is_special_symbol(RBinSymbol *s) {
-	return s->type && !strcmp (s->type, R_BIN_TYPE_SPECIAL_SYM_STR);
+static inline bool is_special_symbol(RBinSymbol *s) {
+	return s && s->type && !strcmp (s->type, R_BIN_TYPE_SPECIAL_SYM_STR);
 }
 
-static bool is_section_reloc(RBinReloc *r) {
+static inline bool is_section_reloc(RBinReloc *r) {
 	return is_section_symbol (r->symbol);
 }
 
-static bool is_file_symbol(RBinSymbol *s) {
+static inline bool is_file_symbol(RBinSymbol *s) {
 	/* workaround for some bin plugs (e.g. ELF) */
 	return (s && s->type && !strcmp (s->type, R_BIN_TYPE_FILE_STR));
 }
 
-static bool is_file_reloc(RBinReloc *r) {
+static inline bool is_file_reloc(RBinReloc *r) {
 	return is_file_symbol (r->symbol);
 }
 
@@ -1863,11 +1883,14 @@ static bool bin_relocs(RCore *r, PJ *pj, int mode, int va) {
 			set_bin_relocs (&ri, reloc, addr, &db, &sdb_module);
 			add_metadata (r, reloc, addr, mode);
 		} else if (IS_MODE_SIMPLE (mode)) {
-			r_cons_printf ("0x%08"PFMT64x"  %s\n", addr, reloc->import ? reloc->import->name : "");
+			if (reloc->import) {
+				const char *name = r_bin_name_tostring (reloc->import->name);
+				r_cons_printf ("0x%08"PFMT64x"  %s\n", addr, name);
+			}
 		} else if (IS_MODE_RAD (mode)) {
 			char *name = reloc->import
-				? strdup (reloc->import->name)
-				: (reloc->symbol ? strdup (reloc->symbol->name) : NULL);
+				? strdup (r_bin_name_tostring (reloc->import->name))
+				: (reloc->symbol ? strdup (r_bin_name_tostring (reloc->symbol->name)) : NULL);
 			if (name) {
 				if (bin_demangle) {
 					char *mn = r_bin_demangle (r->bin->cur, NULL, name, addr, keep_lib);
@@ -1900,11 +1923,13 @@ static bool bin_relocs(RCore *r, PJ *pj, int mode, int va) {
 			char *relname = NULL;
 
 			if (reloc->import) {
-				mn = r_bin_demangle (r->bin->cur, lang, reloc->import->name, addr, keep_lib);
-				relname = strdup (reloc->import->name);
+				const char *iname = r_bin_name_tostring (reloc->import->name);
+				mn = r_bin_demangle (r->bin->cur, lang, iname, addr, keep_lib);
+				relname = strdup (iname);
 			} else if (reloc->symbol) {
-				mn = r_bin_demangle (r->bin->cur, lang, reloc->symbol->name, addr, keep_lib);
-				relname = strdup (reloc->symbol->name);
+				const char *sname = r_bin_name_tostring (reloc->symbol->name);
+				mn = r_bin_demangle (r->bin->cur, lang, sname, addr, keep_lib);
+				relname = strdup (sname);
 			}
 
 			// check if name is available
@@ -1935,9 +1960,9 @@ static bool bin_relocs(RCore *r, PJ *pj, int mode, int va) {
 			}
 
 			char *name = reloc->import
-				? strdup (reloc->import->name)
+				? strdup (r_bin_name_tostring (reloc->import->name))
 					: reloc->symbol
-					? strdup (reloc->symbol->name)
+					? strdup (r_bin_name_tostring (reloc->symbol->name))
 				: NULL;
 			if (bin_demangle) {
 				char *mn = r_bin_demangle (r->bin->cur, NULL, name, addr, keep_lib);
@@ -2027,7 +2052,7 @@ R_DEPRECATE static RBinSymbol *get_import(RBin *bin, RVecRBinSymbol *symbols, co
 				continue;
 			}
 			/* ${name}=${ptrToSymbol} */
-			if (!sdb_num_add (mydb, r_strf ("%x", sdb_hash (symbol->name)), (ut64)(size_t)symbol, 0)) {
+			if (!sdb_num_add (mydb, r_strf ("%x", sdb_hash (r_bin_name_tostring (symbol->name))), (ut64)(size_t)symbol, 0)) {
 			//	eprintf ("DUP (%s)\n", symbol->name);
 			}
 			/* 0x${vaddr}=${ptrToSymbol} */
@@ -2035,7 +2060,7 @@ R_DEPRECATE static RBinSymbol *get_import(RBin *bin, RVecRBinSymbol *symbols, co
 			//	eprintf ("DUP (%s)\n", symbol->name);
 			}
 			if (name) {
-				if (!res && !strcmp (symbol->name, name)) {
+				if (!res && !strcmp (r_bin_name_tostring (symbol->name), name)) {
 					res = symbol;
 				}
 			} else {
@@ -2126,10 +2151,11 @@ static bool bin_imports(RCore *r, PJ *pj, int mode, int va, const char *name) {
 		r_table_set_columnsf (table, "nXssss", "nth", "vaddr", "bind", "type", "lib", "name");
 	}
 	r_list_foreach (imports, iter, import) {
-		if (name && strcmp (import->name, name)) {
+		const char *iname = r_bin_name_tostring (import->name);
+		if (name && strcmp (iname, name)) {
 			continue;
 		}
-		char *symname = strdup (import->name);
+		char *symname = strdup (iname);
 		char *libname = import->libname ? strdup (import->libname) : NULL;
 		ut64 addr = lit ? r_core_bin_impaddr (r->bin, va, symname): 0;
 		if (bin_demangle) {
@@ -2268,30 +2294,29 @@ typedef struct {
 	char *methflag;  // methods flag sym.[class].[method]
 } SymName;
 
-static void snInit(RCore *r, SymName *sn, RBinSymbol *sym, const char *lang) {
-	bool bin_demangle = !!lang;
-	bool keep_lib = r_config_get_b (r->config, "bin.demangle.libs");
+static void snInit(RCore *r, SymName *sn, RBinSymbol *sym, const char *lang, bool bin_demangle) {
+	bin_demangle &= !!lang;
 	if (!r || !sym || !sym->name) {
 		return;
 	}
-	sn->name = r_str_newf ("%s%s", sym->is_imported ? "imp." : "", sym->name);
+	const char *sym_name = r_bin_name_tostring (sym->name);
+	sn->name = r_str_newf ("%s%s", sym->is_imported ? "imp." : "", sym_name);
 	sn->libname = sym->libname ? strdup (sym->libname) : NULL;
 	const char *pfx = symbol_flag_prefix (sym);
-	const char *symname = sym->name;
+	const char *symname = sym_name;
 	char *resymname = NULL;
 	if (sym->dup_count > 0) {
-		resymname = r_str_newf ("%s_%d", sym->name, sym->dup_count);
+		resymname = r_str_newf ("%s_%d", sym_name, sym->dup_count);
 		symname = resymname;
 	}
 	sn->nameflag = construct_symbol_flagname (pfx, sym->libname, symname, MAXFLAG_LEN_DEFAULT);
 	free (resymname);
-	if (sym->classname && sym->classname[0]) {
+	if (R_STR_ISNOTEMPTY (sym->classname)) {
 		sn->classname = strdup (sym->classname);
 		sn->classflag = r_str_newf ("sym.%s.%s", sn->classname, sn->name);
 		r_name_filter (sn->classflag, MAXFLAG_LEN_DEFAULT);
-		const char *name = sym->dname? sym->dname: sym->name;
-		sn->methname = r_str_newf ("%s::%s", sn->classname, name);
-		sn->methflag = r_str_newf ("sym.%s.%s", sn->classname, name);
+		sn->methname = r_str_newf ("%s::%s", sn->classname, sym_name);
+		sn->methflag = r_str_newf ("sym.%s.%s", sn->classname, sym_name);
 		r_name_filter (sn->methflag, strlen (sn->methflag));
 	} else {
 		sn->classname = NULL;
@@ -2302,6 +2327,7 @@ static void snInit(RCore *r, SymName *sn, RBinSymbol *sym, const char *lang) {
 	sn->demname = NULL;
 	sn->demflag = NULL;
 	if (bin_demangle && sym->paddr) {
+		const bool keep_lib = r_config_get_b (r->config, "bin.demangle.libs");
 		sn->demname = r_bin_demangle (r->bin->cur, lang, sn->name, sym->vaddr, keep_lib);
 		if (sn->demname) {
 			sn->demflag = construct_symbol_flagname (pfx, sym->libname, sn->demname, -1);
@@ -2335,19 +2361,20 @@ static ut64 compute_addr(RBin *bin, ut64 paddr, ut64 vaddr, int va) {
 
 static void handle_arm_special_symbol(RCore *core, RBinSymbol *symbol, int va) {
 	ut64 addr = compute_addr (core->bin, symbol->paddr, symbol->vaddr, va);
-	if (!strcmp (symbol->name, "$a")) {
+	const char *oname = r_bin_name_tostring2 (symbol->name, 'o');
+	if (!strcmp (oname, "$a")) {
 		r_anal_hint_set_bits (core->anal, addr, 32);
-	} else if (!strcmp (symbol->name, "$x")) {
+	} else if (!strcmp (oname, "$x")) {
 		r_anal_hint_set_bits (core->anal, addr, 64);
-	} else if (!strcmp (symbol->name, "$t")) {
+	} else if (!strcmp (oname, "$t")) {
 		r_anal_hint_set_bits (core->anal, addr, 16);
-	} else if (!strcmp (symbol->name, "$d")) {
+	} else if (!strcmp (oname, "$d")) {
 		// TODO: we could add data meta type at addr, but sometimes $d
 		// is in the middle of the code and it would make the code less
 		// readable.
 	} else {
 		if (core->bin->verbose) {
-			R_LOG_WARN ("Special symbol %s not handled", symbol->name);
+			R_LOG_WARN ("Special symbol %s not handled", oname);
 		}
 	}
 }
@@ -2383,6 +2410,7 @@ static void select_flag_space(RCore *core, RBinSymbol *symbol) {
 	if (symbol->is_imported) {
 		r_flag_space_push (core->flags, R_FLAGS_FS_IMPORTS);
 	} else if (symbol->type && !strcmp (symbol->type, R_BIN_TYPE_SECTION_STR)) {
+		// TODO get rid of this R2_590
 		r_flag_space_push (core->flags, R_FLAGS_FS_SYMBOLS_SECTIONS);
 	} else {
 		r_flag_space_push (core->flags, R_FLAGS_FS_SYMBOLS);
@@ -2444,26 +2472,33 @@ static bool bin_symbols(RCore *r, PJ *pj, int mode, ut64 laddr, int va, ut64 at,
 
 	RBinSymbol *symbol;
 	R_VEC_FOREACH (symbols, symbol) {
-		if (!symbol->name) {
+		const char *rawname = r_bin_name_tostring2 (symbol->name, 'o');
+		const char *name = r_bin_name_tostring (symbol->name);
+		if (!name) {
 			continue;
+		}
+		if (rawname == name) {
+			rawname = NULL;
 		}
 		if (exponly && !its_an_export (symbol)) {
 			continue;
 		}
-		if (name && strcmp (symbol->name, name)) {
+		if (name && strcmp (name, name)) {
 			continue;
 		}
 		ut64 addr = compute_addr (r->bin, symbol->paddr, symbol->vaddr, va);
-		ut32 len = symbol->size ? symbol->size : 32;
+		ut32 len = symbol->size ? symbol->size : 1;
 		if (at != UT64_MAX && (!symbol->size || !is_in_range (at, addr, symbol->size))) {
 			continue;
 		}
-		if ((printHere && !is_in_range (r->offset, symbol->paddr, len))
-			&& (printHere && !is_in_range (r->offset, addr, len))) {
-			continue;
+		if (printHere) {
+			// const ut64 addr = va? symbol->vaddr: symbol->paddr;
+			if (!is_in_range (r->offset, addr, len)) {
+				continue;
+			}
 		}
 		SymName sn = {0};
-		snInit (r, &sn, symbol, lang);
+		snInit (r, &sn, symbol, lang, bin_demangle);
 		char *r_symbol_name = r_str_escape_utf8 (sn.name, false, true);
 
 		if (IS_MODE_SET (mode) && (is_section_symbol (symbol) || is_file_symbol (symbol))) {
@@ -2505,7 +2540,7 @@ static bool bin_symbols(RCore *r, PJ *pj, int mode, ut64 laddr, int va, ut64 at,
 					}
 				}
 			} else {
-				const char *n = sn.demname ? sn.demname : symbol->name;
+				const char *n = sn.demname ? sn.demname : name;
 				const char *fn = sn.demflag ? sn.demflag : sn.nameflag;
 				char *fnp = (r->bin->prefix) ?
 					r_str_newf ("%s.%s", r->bin->prefix, fn):
@@ -2526,7 +2561,7 @@ static bool bin_symbols(RCore *r, PJ *pj, int mode, ut64 laddr, int va, ut64 at,
 				free (fnp);
 			}
 			if (sn.demname) {
-				ut64 size = symbol->size? symbol->size: 1;
+				ut64 size = symbol->size > 0? symbol->size: 1;
 				r_meta_set (r->anal, R_META_TYPE_COMMENT, addr, size, sn.demname);
 			}
 			r_flag_space_pop (r->flags);
@@ -2538,10 +2573,20 @@ static bool bin_symbols(RCore *r, PJ *pj, int mode, ut64 laddr, int va, ut64 at,
 				pj_ks (pj, "demname", sn.demname);
 			}
 			pj_ks (pj, "flagname", sn.nameflag);
-			pj_ks (pj, "realname", symbol->name);
+			pj_ks (pj, "realname", name);
+			if (rawname) {
+				pj_ks (pj, "rawname", rawname);
+			}
+			if (symbol->classname) {
+				pj_ks (pj, "classname", symbol->classname);
+			}
 			pj_ki (pj, "ordinal", symbol->ordinal);
 			pj_ks (pj, "bind", symbol->bind);
 			pj_kn (pj, "size", (ut64)symbol->size);
+			const char *safetyName = r_bin_symbol_unsafe (r->bin, name);
+			if (safetyName) {
+				pj_ks (pj, "unsafe", safetyName);
+			}
 			pj_ks (pj, "type", symbol->type);
 			pj_kn (pj, "vaddr", addr);
 			pj_kn (pj, "paddr", symbol->paddr);
@@ -2649,7 +2694,7 @@ next:
 		free (s);
 	}
 
-	//handle thumb and arm for entry point since they are not present in symbols
+	// handle thumb and arm for entry point since they are not present in symbols
 	if (is_arm) {
 		r_list_foreach (entries, iter, entry) {
 			if (IS_MODE_SET (mode)) {
@@ -2746,11 +2791,10 @@ static RIODesc *findReusableFile(RIO *io, const char *uri, int perm) {
 	return arg.desc;
 }
 
-static bool io_create_mem_map(RIO *io, RBinSection *sec, ut64 at) {
+static bool io_create_mem_map(RIO *io, RBinSection *sec, ut64 at, ut64 gap) {
 	r_return_val_if_fail (io && sec, false);
 
 	bool reused = false;
-	ut64 gap = sec->vsize - sec->size;
 	char *uri = r_str_newf ("null://%"PFMT64u, gap);
 	RIODesc *desc = findReusableFile (io, uri, sec->perm);
 	if (desc) {
@@ -2782,6 +2826,9 @@ static bool io_create_mem_map(RIO *io, RBinSection *sec, ut64 at) {
 	return true;
 }
 
+
+
+
 static void add_section(RCore *core, RBinSection *sec, ut64 addr, int fd) {
 	if (!r_io_desc_get (core->io, fd) || UT64_ADD_OVFCHK (sec->size, sec->paddr) ||
 			UT64_ADD_OVFCHK (sec->size, addr) || !sec->vsize) {
@@ -2789,18 +2836,16 @@ static void add_section(RCore *core, RBinSection *sec, ut64 addr, int fd) {
 	}
 
 	ut64 size = sec->vsize;
+	const ut64 fdsize = r_io_fd_size (core->io, fd);
+	const ut64 psize = (sec->paddr < fdsize)? R_MIN (sec->size, fdsize - sec->paddr): 0LL;
 	// if there is some part of the section that needs to be zeroed by the loader
 	// we add a null map that takes care of it
-	if (sec->vsize > sec->size) {
-		if (!io_create_mem_map (core->io, sec, addr + sec->size)) {
-			return;
-		}
-		size = sec->size;
-		if (!size) {
+	if (sec->vsize > psize) {
+		size = psize;
+		if (!io_create_mem_map (core->io, sec, addr + psize, sec->vsize - psize) || !size) {
 			return;
 		}
 	}
-
 	// then we map the part of the section that comes from the physical file
 	char *map_name = r_str_newf ("fmap.%s", sec->name);
 	if (!map_name) {
@@ -3109,6 +3154,8 @@ static bool bin_sections(RCore *r, PJ *pj, int mode, ut64 laddr, int va, ut64 at
 				}
 				R_FREE (str);
 			}
+		} else if (IS_MODE_SIMPLEST (mode)) {
+			r_cons_printf ("%s\n", section->name);
 		} else if (IS_MODE_SIMPLE (mode)) {
 			char *hashstr = NULL;
 			if (hashtypes) {
@@ -3272,13 +3319,17 @@ out:
 }
 
 static bool bin_fields(RCore *r, PJ *pj, int mode, int va) {
-	RList *fields;
+	const int pref = r_config_get_b (r->config, "asm.demangle")? 'd': 0;
 	RListIter *iter;
 	RBinField *field;
 	int i = 0;
 	RBin *bin = r->bin;
-
-	if (!(fields = r_bin_get_fields (bin))) {
+	RBinObject *o = r_bin_cur_object (bin);
+	if (!o) {
+		return false;
+	}
+	RList *fields = o->fields;
+	if (!fields) {
 		if (IS_MODE_JSON (mode)) {
 			pj_o (pj);
 			pj_end (pj);
@@ -3290,39 +3341,48 @@ static bool bin_fields(RCore *r, PJ *pj, int mode, int va) {
 		r_core_bin_export_info (r, R_MODE_SET);
 		pj_a (pj);
 	} else if (IS_MODE_RAD (mode)) {
-		r_cons_println ("fs header");
+		r_cons_println ("fs+header");
 	} else if (IS_MODE_NORMAL (mode)) {
 		r_cons_println ("[Header fields]");
 	}
 	r_list_foreach (fields, iter, field) {
+		const bool haveComment = R_STR_ISNOTEMPTY (field->comment);
+		ut64 v = field->value;
+		if (v == UT64_MAX) {
+			v = 0;
+		}
 		ut64 addr = rva (bin, field->paddr, field->vaddr, va);
 
 		if (IS_MODE_RAD (mode)) {
-			char *n = r_name_filter_quoted_shell (field->name);
-			r_name_filter (n, -1);
-			r_cons_printf ("\"f header.%s 1 0x%08"PFMT64x"\"\n", n, addr);
+			const char *fname = r_bin_name_tostring2 (field->name, 'f');
+			r_cons_printf ("'f header.%s 1 0x%08"PFMT64x"\n", fname, addr);
+			if (field->value != 0 && field->value != UT64_MAX) {
+				r_cons_printf ("'f header.%s.value 1 0x%08"PFMT64x"\n", fname, field->value);
+			}
 			if (field->comment && *field->comment) {
 				char *e = sdb_encode ((const ut8*)field->comment, -1);
-				r_cons_printf ("CCu %s @ 0x%"PFMT64x"\n", e, addr);
+				r_cons_printf ("CCu base64:%s @ 0x%"PFMT64x"\n", e, addr);
 				free (e);
 				char *f = r_name_filter_shell (field->format);
 				r_cons_printf ("Cf %d %s @ 0x%"PFMT64x"\n", field->size, f, addr);
 				free (f);
 			}
-			if (field->format && *field->format && !field->format_named) {
-				r_cons_printf ("pf.%s %s\n", n, field->format);
+			if (!field->format_named && R_STR_ISNOTEMPTY (field->format)) {
+				r_cons_printf ("pf.%s %s\n", fname, field->format);
 			}
-			free (n);
 		} else if (IS_MODE_JSON (mode)) {
 			pj_o (pj);
-			pj_ks (pj, "name", field->name);
+			pj_ks (pj, "name", r_bin_name_tostring2 (field->name, pref));
 			pj_kN (pj, "vaddr", field->vaddr);
 			pj_kN (pj, "paddr", field->paddr);
+			if (v) {
+				pj_kN (pj, "value", v);
+			}
 			if (field->comment && *field->comment) {
 				// TODO: filter comment before json
 				pj_ks (pj, "comment", field->comment);
 			}
-			if (field->format && *field->format) {
+			if (R_STR_ISNOTEMPTY (field->format)) {
 				// TODO: filter comment before json
 				pj_ks (pj, "format", field->format);
 			}
@@ -3336,16 +3396,24 @@ static bool bin_fields(RCore *r, PJ *pj, int mode, int va) {
 			free (o);
 			pj_end (pj);
 		} else if (IS_MODE_NORMAL (mode)) {
-			const bool haveComment = (field->comment && *field->comment);
-			r_cons_printf ("0x%08"PFMT64x" 0x%08"PFMT64x" %s%s%s\n",
-				field->vaddr, field->paddr, field->name,
+			r_cons_printf ("0x%08"PFMT64x" 0x%08"PFMT64x" 0x%08"PFMT64x" %s%s%s",
+				field->vaddr, field->paddr, v, r_bin_name_tostring2 (field->name, pref),
 				haveComment? "; ": "",
 				haveComment? field->comment: "");
+			r_cons_newline ();
+		} else if (IS_MODE_SET (mode)) {
+			// nothing
+		} else {
+			// quiet
+			r_cons_printf ("0x%08"PFMT64x" 0x%08"PFMT64x" %s\n",
+				field->vaddr, v, r_bin_name_tostring2 (field->name, pref));
 		}
 		i++;
 	}
 	if (IS_MODE_JSON (mode)) {
 		pj_end (pj);
+	} else if (IS_MODE_RAD (mode)) {
+		r_cons_println ("fs-");
 	} else if (IS_MODE_NORMAL (mode)) {
 		r_cons_printf ("\n%i fields\n", i);
 	}
@@ -3427,6 +3495,7 @@ static bool bin_trycatch(RCore *core, PJ *pj, int mode) {
 	return true;
 }
 
+// TODO: move this into r.bin.demangle
 // https://nshipster.com/type-encodings/
 static char *objc_type_toc(const char *objc_type) {
 	if (!objc_type) {
@@ -3485,38 +3554,87 @@ static char *objc_name_toc(const char *objc_name) {
 }
 
 static void classdump_c(RCore *r, RBinClass *c) {
-	r_cons_printf ("typedef struct class_%s {\n", c->name);
+	const int pref = r_config_get_b (r->config, "asm.demangle")? 'd': 0;
+	r_cons_printf ("typedef struct {\n");
 	RListIter *iter2;
 	RBinField *f;
+	bool is_objc = false;
 	r_list_foreach (c->fields, iter2, f) {
-		if (f->type && f->name) {
-			char *n = objc_name_toc (f->name);
-			char *t = objc_type_toc (f->type);
-			r_cons_printf ("    %s %s; // %d\n", t, n, f->offset);
+		if (f->name) {
+			const char *fn = r_bin_name_tostring2 (f->name, pref);
+			const char *ft = f->type? r_bin_name_tostring2 (f->type, pref): NULL;
+			char *n = objc_name_toc (fn);
+			char *t = ft? objc_type_toc (ft): NULL;
+			if (f->offset < 32 && !t) {
+				continue;
+			}
+			if (R_STR_ISEMPTY (t)) {
+				t = strdup ("void*");
+			}
+			if (!is_objc && !strcmp (n, "isa")) {
+				is_objc = true;
+			}
+			r_str_replace_char (n, ':', '_');
+			r_str_replace_char (n, '.', '_');
+			r_cons_printf ("    %s %s; // 0x%x\n", t, n, f->offset);
 			free (t);
 			free (n);
 		}
 	}
-	r_cons_printf ("} %s;\n", c->name);
+	const char *klass_name = r_bin_name_tostring2 (c->name, pref);
+	if (is_objc) {
+		r_cons_printf ("} objc_class_%s;\n", klass_name);
+	} else {
+		r_cons_printf ("} class_%s;\n", klass_name);
+	}
+}
+
+static void classdump_cxx(RCore *r, RBinClass *c) {
+	const int pref = r_config_get_b (r->config, "asm.demangle")? 'd': 0;
+	const char *klass_name = r_bin_name_tostring2 (c->name, pref);
+	r_cons_printf ("class %s {\n", klass_name);
+	RListIter *iter2;
+	RBinField *f;
+	bool is_objc = false;
+	r_list_foreach (c->fields, iter2, f) {
+		if (f->name) {
+			const char *fn = r_bin_name_tostring2 (f->name, pref);
+			const char *ft = r_bin_name_tostring2 (f->type, pref);
+			char *n = objc_name_toc (fn);
+			char *t = ft? objc_type_toc (ft): NULL;
+			if (f->offset < 32 && !t) {
+				continue;
+			}
+			if (R_STR_ISEMPTY (t)) {
+				t = strdup ("void*");
+			}
+			if (!is_objc && !strcmp (n, "isa")) {
+				is_objc = true;
+			}
+			r_str_replace_char (n, ':', '_');
+			r_str_replace_char (n, '.', '_');
+			r_cons_printf ("    %s %s; // 0x%x\n", t, n, f->offset);
+			free (t);
+			free (n);
+		}
+	}
+	r_cons_println ("};\n");
 }
 
 static void classdump_objc(RCore *r, RBinClass *c) {
+	const int pref = r_config_get_b (r->config, "asm.demangle")? 'd': 0;
+	const char *cname = r_bin_name_tostring2 (c->name, pref);
 	if (c->super) {
 		int n = 0;
-		r_cons_printf ("@interface %s :", c->name);
-		const char *sk;
+		r_cons_printf ("@interface %s :", cname);
+		RBinName *bn;
 		RListIter *iter;
-		r_list_foreach (c->super, iter, sk) {
+		r_list_foreach (c->super, iter, bn) {
+			const char *sk = r_bin_name_tostring2 (bn, pref);
 			switch (n) {
-			case 0:
-				r_cons_printf (" %s", sk);
-				break;
-			case 1:
-				r_cons_printf ("< %s", sk);
-				break;
-			default:
-				r_cons_printf (", %s", sk);
-				break;
+			case 0: r_cons_printf (" %s", sk); break;
+			case 1: r_cons_printf ("< %s", sk); break;
+			default: r_cons_printf (", %s", sk); break;
 			}
 		}
 		if (r_list_length (c->super) > 1) {
@@ -3525,54 +3643,127 @@ static void classdump_objc(RCore *r, RBinClass *c) {
 			r_cons_printf ("\n{\n");
 		}
 	} else {
-		r_cons_printf ("@interface %s\n{\n", c->name);
+		r_cons_printf ("@interface %s\n{\n", cname);
 	}
 	RListIter *iter2, *iter3;
 	RBinField *f;
 	RBinSymbol *sym;
 	r_list_foreach (c->fields, iter2, f) {
-		if (f->name && r_regex_match ("ivar","e", f->name)) {
-			r_cons_printf ("  %s %s\n", f->type, f->name);
+		if (f->name) { //  && r_regex_match ("ivar","e", f->name)) {
+			const char *ks = r_bin_field_kindstr (f);
+			const char *fn = r_bin_name_tostring2 (f->name, pref);
+			if (f->type) {
+				const char *ft = r_bin_name_tostring2 (f->type, pref);
+				r_cons_printf ("  %s %s::(%s)%s\n", ft, cname, ks, fn);
+			} else {
+				r_cons_printf ("  isa %s::(%s)%s\n", cname, ks, fn);
+			}
 		}
 	}
-	r_cons_printf ("}\n");
+	r_cons_println ("}");
 	r_list_foreach (c->methods, iter3, sym) {
+		const char *sname = r_bin_name_tostring2 (sym->name, pref);
+		char *rp = NULL;
 		if (sym->rtype && sym->rtype[0] != '@') {
-			char *rp = get_rp (sym->rtype);
-			r_cons_printf ("%s (%s) %s\n",
-					strncmp (sym->type, R_BIN_TYPE_METH_STR, 4)? "+": "-",
-					rp, sym->dname? sym->dname: sym->name);
-			free (rp);
+			rp = get_rp (sym->rtype);
 		} else if (sym->type) {
-			r_cons_printf ("%s (id) %s\n",
-					strncmp (sym->type, R_BIN_TYPE_METH_STR, 4)? "+": "-",
-					sym->dname? sym->dname: sym->name);
+			rp = strdup ("id");
+		}
+		if (rp) {
+			const char *sign = r_str_startswith (sym->type, R_BIN_TYPE_METH_STR)? "+": "-";
+			r_cons_printf ("%s (%s) %s\n", sign, rp, sname);
+			free (rp);
 		}
 	}
 	r_cons_printf ("@end\n");
 }
 
-static void classdump_java(RCore *r, RBinClass *c) {
+static void classdump_swift(RCore *r, RBinClass *c) {
+	const int pref = r_config_get_b (r->config, "asm.demangle")? 'd': 0;
 	RBinField *f;
-	RListIter *iter2, *iter3;
+	RListIter *iter;
 	RBinSymbol *sym;
-	char *pn = strdup (c->name);
+	const char *cname = r_bin_name_tostring2 (c->name, pref);
+	char *pn = strdup (cname);
 	char *cn = (char *)r_str_rchr (pn, NULL, '/');
 	if (cn) {
 		*cn = 0;
 		cn++;
 		r_str_replace_char (pn, '/', '.');
 	}
+	char *klassname = cn? cn: pn;
+	if (cn) {
+		r_cons_printf ("// namespace %s\n\n", pn);
+	}
+	if (c->lang == R_BIN_LANG_OBJC) {
+		r_cons_printf ("@objc\n");
+	}
+	r_cons_printf ("class %s ", klassname);
+	if (!r_list_empty (c->super)) {
+		RBinName *bn;
+		r_list_foreach (c->super, iter, bn) {
+			r_cons_printf (": %s", r_bin_name_tostring2 (bn, 'd')); // TODO pref));
+		}
+		r_cons_printf (" ");
+	}
+	r_cons_printf ("{\n");
+	free (klassname);
+	r_list_foreach (c->fields, iter, f) {
+		if (!f->name) {
+			continue;
+		}
+		const char *var = r_bin_field_kindstr (f);
+		const char *fname = r_bin_name_tostring2 (f->name, pref);
+		const char *ftype = r_bin_name_tostring2 (f->type, pref);
+		if (R_STR_ISNOTEMPTY (ftype)) {
+			r_cons_printf ("  %s %s : %s;\n", var, fname, ftype);
+		} else {
+			r_cons_printf ("  %s %s;\n", var, fname);
+		}
+	}
+	r_list_foreach (c->methods, iter, sym) {
+		const char *mn = r_bin_name_tostring2 (sym->name, pref);
+		const char *ms = strstr (mn, "method.");
+		if (ms) {
+			mn = ms + strlen ("method.");
+		}
+		r_cons_printf ("  func %s", mn);
+		if (!strchr (mn, '(')) {
+			r_cons_printf ("()");
+		}
+		r_cons_printf (" {}  // 0x%08"PFMT64x"\n", sym->vaddr);
+	}
+	r_cons_printf ("}\n");
+}
+
+static void classdump_java(RCore *r, RBinClass *c) {
+	RBinField *f;
+	RListIter *iter;
+	RBinSymbol *sym;
+	const int pref = r_config_get_b (r->config, "asm.demangle")? 'd': 0;
+	const char *cname = r_bin_name_tostring2 (c->name, pref);
+	char *pn = strdup (cname);
+	char *cn = (char *)r_str_rchr (pn, NULL, '/');
+	if (cn) {
+		*cn = 0;
+		cn++;
+		r_str_replace_char (pn, '/', '.');
+	} else {
+		char *dot = (char *)r_str_rchr (pn, NULL, '.');
+		cn = dot? dot + 1: pn;
+	}
 	r_cons_printf ("package %s;\n\n", pn);
 	r_cons_printf ("public class %s {\n", cn);
 	free (pn);
-	r_list_foreach (c->fields, iter2, f) {
-		if (f->name && r_regex_match ("ivar", "e", f->name)) {
-			r_cons_printf ("  public %s %s\n", f->type, f->name);
+	r_list_foreach (c->fields, iter, f) {
+		if (f->name && f->kind == R_BIN_FIELD_KIND_VARIABLE) {
+			const char *fname = r_bin_name_tostring2 (f->name, pref);
+			const char *tp = r_bin_name_tostring2 (f->type, pref);
+			r_cons_printf ("  public %s %s\n", R_STR_ISNOTEMPTY (tp)? tp: "Object", fname);
 		}
 	}
-	r_list_foreach (c->methods, iter3, sym) {
-		const char *mn = sym->dname? sym->dname: sym->name;
+	r_list_foreach (c->methods, iter, sym) {
+		const char *mn = r_bin_name_tostring2 (sym->name, pref);
 		const char *ms = strstr (mn, "method.");
 		if (ms) {
 			mn = ms + strlen ("method.");
@@ -3582,12 +3773,26 @@ static void classdump_java(RCore *r, RBinClass *c) {
 	r_cons_printf ("}\n\n");
 }
 
+static bool is_swift(RBinFile *bf) {
+	return (bf->bo->lang == R_BIN_LANG_SWIFT);
+}
+
+static bool is_javaish(RBinFile *bf) {
+	if (bf->bo->lang == R_BIN_LANG_JAVA) {
+		return true;
+	}
+	if (bf->bo->info && bf->bo->info->lang && strstr (bf->bo->info->lang, "dalvik")) {
+		return true;
+	}
+	return false;
+}
+
 static bool bin_classes(RCore *r, PJ *pj, int mode) {
+	const int pref = r_config_get_b (r->config, "asm.demangle")? 'd': 0;
 	RListIter *iter, *iter2, *iter3;
 	RBinSymbol *sym;
 	RBinClass *c;
 	RBinField *f;
-	char *name;
 	RList *cs = r_bin_get_classes (r->bin);
 	if (!cs) {
 		if (IS_MODE_JSON (mode)) {
@@ -3610,10 +3815,12 @@ static bool bin_classes(RCore *r, PJ *pj, int mode) {
 	}
 	const bool bin_filter = r_config_get_b (r->config, "bin.filter");
 	r_list_foreach (cs, iter, c) {
-		if (!c || !c->name || !c->name[0]) {
+		const char *cname = r_bin_name_tostring2 (c->name, pref);
+		const char *rname = r_bin_name_tostring2 (c->name, 'o');
+		if (!c || R_STR_ISEMPTY (cname)) {
 			continue;
 		}
-		name = strdup (c->name);
+		char *name = strdup (cname);
 		r_name_filter (name, -1);
 		ut64 at_min = UT64_MAX;
 		ut64 at_max = 0LL;
@@ -3637,66 +3844,95 @@ static bool bin_classes(RCore *r, PJ *pj, int mode) {
 			r_strf_var (classname, 256, "class.%s", name);
 			r_flag_set (r->flags, classname, c->addr, 1);
 			r_list_foreach (c->methods, iter2, sym) {
-				char *mflags = r_core_bin_method_flags_str (sym->method_flags, mode);
-				r_strf_var (method, 256, "method%s.%s.%s", mflags, c->name, sym->name);
+				const char *sym_name = r_bin_name_tostring (sym->name);
+				// char *mflags = r_core_bin_attr_tostring (sym->attr, mode);
+				char *mflags = r_bin_attr_tostring (sym->attr, false);
+				r_str_replace_char (mflags, ' ', '.');
+				// XXX probably access flags should not be part of the flag name
+				r_strf_var (method, 256, "method%s%s.%s.%s", R_STR_ISEMPTY (mflags)? "":".", mflags, cname, sym_name);
 				R_FREE (mflags);
 				r_name_filter (method, -1);
 				r_flag_set (r->flags, method, sym->vaddr, 1);
 			}
 			r_list_foreach (c->fields, iter2, f) {
-				char *fn = r_str_newf ("field.%s.%s", classname, f->name);
+				const char *fname = r_bin_name_tostring2 (f->name, pref);
+				const char *kind = r_bin_field_kindstr (f);
+				// XXX remove 'field' and just use kind?
+				char *fn = r_str_newf ("field.%s.%s.%s", classname, kind, fname);
 				ut64 at = f->vaddr;
 				r_flag_set (r->flags, fn, at, 1);
 				free (fn);
 			}
 		} else if (IS_MODE_SIMPLEST (mode)) {
-			r_cons_printf ("%s\n", c->name);
+			r_cons_printf ("%s\n", cname);
 		} else if (IS_MODE_SIMPLE (mode)) {
-			char *supers = c->super
-				? r_str_list_join (c->super, ", ")
-				: strdup ("");
+			char *supers = csv_supers (c->super);
 			r_cons_printf ("0x%08"PFMT64x" [0x%08"PFMT64x" - 0x%08"PFMT64x"] %s %s%s%s\n",
-				c->addr, at_min, at_max, r_bin_lang_tostring (c->lang), c->name, c->super ? " " : "",
-				r_str_get (supers));
+				c->addr, at_min, at_max, r_bin_lang_tostring (c->lang), cname, *supers ? " " : "", supers);
 			free (supers);
 		} else if (IS_MODE_CLASSDUMP (mode)) {
 			if (c) {
-				RBinFile *bf = r_bin_cur (r->bin);
-				if (bf && bf->bo) {
-					if (IS_MODE_RAD (mode)) {
-						classdump_c (r, c);
-					} else if (bf->bo->lang == R_BIN_LANG_JAVA || (bf->bo->info && bf->bo->info->lang && strstr (bf->bo->info->lang, "dalvik"))) {
+				const char *vlang = r_config_get (r->config, "bin.lang");
+				r_str_var (lang, 16, vlang);
+				if (*lang) {
+					if (!strcmp (lang, "java") || !strcmp (lang, "kotlin")) {
 						classdump_java (r, c);
-					} else {
+					} else if (!strcmp (lang, "swift")) {
+						classdump_swift (r, c);
+					} else if (!strcmp (lang, "cxx") || !strcmp (lang, "c++")) {
+						classdump_cxx (r, c);
+					} else if (!strcmp (lang, "c")) {
+						classdump_c (r, c);
+					} else if (r_str_startswith (lang, "objc")) {
 						classdump_objc (r, c);
+					} else {
+						classdump_c (r, c);
 					}
 				} else {
-					classdump_objc (r, c);
+					RBinFile *bf = r_bin_cur (r->bin);
+					if (bf && bf->bo) {
+						if (IS_MODE_RAD (mode)) {
+							classdump_c (r, c);
+						} else if (mode == 'O') {
+							classdump_objc (r, c);
+						} else if (is_javaish (bf) || mode == 'J') {
+							classdump_java (r, c);
+						} else if (is_swift (bf) || mode == 'S') {
+							classdump_swift (r, c);
+						} else {
+							classdump_objc (r, c);
+						}
+					} else {
+						classdump_c (r, c);
+					}
 				}
 			}
 		} else if (IS_MODE_RAD (mode)) {
 			char *n = r_name_filter_shell (name);
 			r_cons_printf ("\"f class.%s = 0x%"PFMT64x"\"\n", n, at_min);
 			if (c->super) {
-				char *cn = c->name;
+				const char *cn = cname;
 				RListIter *iter;
-				const char *sk;
-				r_list_foreach (c->super, iter, sk) {
-					char *fsk = strdup (sk);
+				RBinName *bn;
+				r_list_foreach (c->super, iter, bn) {
+					char *fsk = strdup (r_bin_name_tostring2 (bn, pref));
 					r_name_filter (fsk, -1);
-					r_cons_printf ("\"f super.%s.%s = %d\"\n",
-							cn, fsk, c->index);
+					r_cons_printf ("\"f super.%s.%s = %d\"\n", cn, fsk, c->index);
 					free (fsk);
 				}
 			}
 			r_list_foreach (c->methods, iter2, sym) {
-				char *mflags = r_core_bin_method_flags_str (sym->method_flags, mode);
-				char *n = c->name; //  r_name_filter_shell (c->name);
-				char *sn = sym->name; //r_name_filter_shell (sym->name);
-				char *cmd = r_str_newf ("\"f method%s.%s.%s = 0x%"PFMT64x"\"\n", mflags, n, sn, sym->vaddr);
+				char *mflags = r_bin_attr_tostring (sym->attr, false);
+				r_str_replace_char (mflags, ' ', '.');
+				const char *n = cname; //  r_name_filter_shell (cname);
+				char *sn = r_bin_name_tostring (sym->name); //r_name_filter_shell (sym->name); // symbol contains classname
+				const char *predot = R_STR_ISNOTEMPTY (mflags)? ".": "";
+				// char *cmd = r_str_newf ("\"f method%s.%s.%s = 0x%"PFMT64x"\"\n", mflags, n, sn, sym->vaddr);
+				char *cmd = r_str_newf ("\"f method.%s%s%s.%s = 0x%"PFMT64x"\"\n", n, predot, mflags, sn, sym->vaddr);
 				// free (n);
 				// free (sn);
 				if (cmd) {
+					// use namefilter thing to create the right flag
 					r_str_replace_char (cmd, ' ', '_');
 					if (strlen (cmd) > 2) {
 						cmd[2] = ' ';
@@ -3712,7 +3948,9 @@ static bool bin_classes(RCore *r, PJ *pj, int mode) {
 				R_FREE (mflags);
 			}
 			r_list_foreach (c->fields, iter2, f) {
-				char *fn = r_str_newf ("field.%s.%s", c->name, f->name);
+				const char *kind = r_bin_field_kindstr (f);
+				const char *fname = r_bin_name_tostring2 (f->name, pref);
+				char *fn = r_str_newf ("field.%s.%s.%s", cname, kind, fname);
 				r_name_filter (fn, -1);
 				ut64 at = f->vaddr; //  sym->vaddr + (f->vaddr &  0xffff);
 				r_cons_printf ("\"f %s = 0x%08"PFMT64x"\"\n", fn, at);
@@ -3720,15 +3958,20 @@ static bool bin_classes(RCore *r, PJ *pj, int mode) {
 			}
 
 			// C struct
-			r_cons_printf ("\"\"td struct %s {", c->name);
+			r_cons_printf ("\"\"td struct %s {", cname);
 			if (r_list_empty (c->fields)) {
 				// XXX workaround because we cant register empty structs yet
 				// XXX https://github.com/radareorg/radare2/issues/16342
 				r_cons_printf (" char empty[0];");
 			} else {
 				r_list_foreach (c->fields, iter2, f) {
-					char *n = objc_name_toc (f->name);
-					char *t = objc_type_toc (f->type);
+					const char *fn = r_bin_name_tostring (f->name);
+					const char *tn = f->type? r_bin_name_tostring (f->type): NULL;
+					char *n = objc_name_toc (fn);
+					char *t = objc_type_toc (tn);
+					if (R_STR_ISEMPTY (t)) {
+						t = strdup ("void* ");
+					}
 					r_cons_printf (" %s %s;", t, n);
 					free (t);
 					free (n);
@@ -3738,7 +3981,10 @@ static bool bin_classes(RCore *r, PJ *pj, int mode) {
 			free (n);
 		} else if (IS_MODE_JSON (mode)) {
 			pj_o (pj);
-			pj_ks (pj, "classname", c->name);
+			pj_ks (pj, "classname", cname);
+			if (rname && rname != cname && strcmp (cname, rname)) {
+				pj_ks (pj, "rawclassname", rname);
+			}
 			pj_kN (pj, "addr", c->addr);
 			const char *lang = r_bin_lang_tostring (c->lang);
 			if (lang && *lang != '?') {
@@ -3746,12 +3992,31 @@ static bool bin_classes(RCore *r, PJ *pj, int mode) {
 			}
 			pj_ki (pj, "index", c->index);
 			if (c->super) {
-				pj_ks (pj, "visibility", r_str_get (c->visibility_str));
+				if (c->visibility_str) {
+					pj_ks (pj, "visibility", c->visibility_str);
+				}
 				RListIter *iter;
-				const char *sk;
 				pj_ka (pj, "super");
-				r_list_foreach (c->super, iter, sk) {
-					pj_s (pj, sk);
+				RBinName *bn;
+				r_list_foreach (c->super, iter, bn) {
+#if 0
+					pj_o (pj);
+					if (bn->name) {
+						pj_ks (pj, "name", bn->name);
+					}
+					if (bn->oname) {
+						pj_ks (pj, "rawname", bn->oname);
+					}
+					pj_end (pj);
+#else
+					pj_s (pj, r_bin_name_tostring (bn));
+#endif
+				}
+				pj_end (pj);
+
+				pj_ka (pj, "rawsuper");
+				r_list_foreach (c->super, iter, bn) {
+					pj_s (pj, bn->oname);
 				}
 				pj_end (pj);
 			}
@@ -3759,7 +4024,12 @@ static bool bin_classes(RCore *r, PJ *pj, int mode) {
 				pj_ka (pj, "methods");
 				r_list_foreach (c->methods, iter2, sym) {
 					pj_o (pj);
-					pj_ks (pj, "name", sym->name);
+					const char *rname = r_bin_name_tostring2 (sym->name, 'o');
+					const char *sname = r_bin_name_tostring2 (sym->name, 'd');
+					if (sname == rname || !strcmp (sname, rname)) {
+						rname = NULL;
+					}
+					pj_ks (pj, "name", sname);
 					RFlagItem *fi = r_flag_get_at (r->flags, sym->vaddr, false);
 					if (fi) {
 						pj_ks (pj, "flag", fi->realname? fi->realname: fi->name);
@@ -3773,11 +4043,18 @@ static bool bin_classes(RCore *r, PJ *pj, int mode) {
 						}
 						free (s);
 					}
-					if (sym->method_flags) {
-						char *mflags = r_core_bin_method_flags_str (sym->method_flags, mode);
+					if (sym->attr) {
+						char *mflags = r_core_bin_attr_tostring (sym->attr, mode);
 						pj_k (pj, "flags");
 						pj_j (pj, mflags);
 						free (mflags);
+					}
+					if (rname) {
+						pj_ks (pj, "rawname", rname);
+					}
+					const char *lang = r_bin_lang_tostring (sym->lang);
+					if (lang && *lang != '?') {
+						pj_ks (pj, "lang", lang);
 					}
 					pj_kN (pj, "addr", sym->vaddr);
 					pj_end (pj);
@@ -3788,13 +4065,15 @@ static bool bin_classes(RCore *r, PJ *pj, int mode) {
 				pj_ka (pj, "fields");
 				r_list_foreach (c->fields, iter3, f) {
 					pj_o (pj);
-					pj_ks (pj, "name", f->name);
-					if (f->type) {
-						pj_ks (pj, "type", f->type);
+					pj_ks (pj, "name", r_bin_name_tostring2 (f->name, pref));
+					pj_ks (pj, "kind", r_bin_field_kindstr (f));
+					const char *type = f->type? r_bin_name_tostring2 (f->type, pref): NULL;
+					if (R_STR_ISNOTEMPTY (type)) {
+						pj_ks (pj, "type", type);
 					}
-					if (f->flags) {
-						char *mflags = r_core_bin_method_flags_str (f->flags, mode);
-						pj_k (pj, "flags");
+					if (f->attr) {
+						char *mflags = r_core_bin_attr_tostring (f->attr, mode);
+						pj_k (pj, "attr");
 						pj_j (pj, mflags);
 						free (mflags);
 					}
@@ -3808,11 +4087,11 @@ static bool bin_classes(RCore *r, PJ *pj, int mode) {
 			int m = 0;
 			const char *cl = r_bin_lang_tostring (c->lang);
 			r_cons_printf ("0x%08"PFMT64x" [0x%08"PFMT64x" - 0x%08"PFMT64x"] %6"PFMT64d" %s class %d %s",
-				c->addr, at_min, at_max, (at_max - at_min), cl, c->index, c->name);
+				c->addr, at_min, at_max, (at_max - at_min), cl, c->index, cname);
 			if (r_list_empty (c->super)) {
 				r_cons_newline ();
 			} else {
-				char *csv = r_str_list_join (c->super, ", ");
+				char *csv = csv_supers (c->super);
 				if (r_str_startswith (csv, "_T")) {
 					R_LOG_WARN ("undemangled symbol, maybe good to fix in rbin instead of core");
 					char *dsuper = r_bin_demangle (r->bin->cur, csv, csv, 0, false);
@@ -3824,20 +4103,23 @@ static bool bin_classes(RCore *r, PJ *pj, int mode) {
 				free (csv);
 			}
 			r_list_foreach (c->methods, iter2, sym) {
-				char *mflags = r_core_bin_method_flags_str (sym->method_flags, mode);
+				char *mflags = r_core_bin_attr_tostring (sym->attr, mode);
 				const char *ls = r_bin_lang_tostring (sym->lang);
-				r_cons_printf ("0x%08"PFMT64x" %s method %d %s %s\n",
-					sym->vaddr, ls? ls: "?", m, mflags, sym->dname? sym->dname: sym->name);
+				const char *sname = r_bin_name_tostring2 (sym->name, pref);
+				r_cons_printf ("0x%08"PFMT64x" %s %8s %3d %s %s\n",
+					sym->vaddr, ls? ls: "?", "method", m, mflags, sname);
 				R_FREE (mflags);
 				m++;
 			}
 			m = 0;
 			const char *ls = r_bin_lang_tostring (c->lang);
 			r_list_foreach (c->fields, iter3, f) {
-				char *mflags = r_core_bin_method_flags_str (f->flags, mode);
-				r_cons_printf ("0x%08"PFMT64x" %s field %d %s %s\n",
-					f->vaddr, ls, m, mflags, f->name);
+				char *mflags = r_core_bin_attr_tostring (f->attr, mode);
+				const char *ks = r_bin_field_kindstr (f);
+				r_cons_printf ("0x%08"PFMT64x" %s %8s %3d %s %s\n",
+					f->vaddr, ls, ks, m, mflags, r_bin_name_tostring2 (f->name, pref));
 				m++;
+				free (mflags);
 			}
 		}
 		free (name);
@@ -4310,7 +4592,9 @@ static void bin_pe_resources(RCore *r, PJ *pj, int mode) {
 			pj_o (pj);
 			pj_ks (pj, "name", name);
 			pj_ki (pj, "index", index);
-			pj_ks (pj, "type", type);
+			if (R_STR_ISNOTEMPTY (type)) {
+				pj_ks (pj, "type", type);
+			}
 			pj_kn (pj, "vaddr", vaddr);
 			pj_ki (pj, "size", size);
 			if (lang && *lang != '?') {
@@ -4424,21 +4708,8 @@ static bool bin_signature(RCore *r, PJ *pj, int mode) {
 	return have_signature;
 }
 
-static bool bin_header(RCore *r, int mode) {
-	r_return_val_if_fail (r, false);
-	RBinFile *cur = r_bin_cur (r->bin);
-	if (!cur) {
-		return false;
-	}
-	RBinPlugin *plg = r_bin_file_cur_plugin (cur);
-	if (plg && plg->header) {
-		plg->header (cur);
-		return true;
-	}
-	return false;
-}
-
 R_API bool r_core_bin_info(RCore *core, int action, PJ *pj, int mode, int va, RCoreBinFilter *filter, const char *chksum) {
+	r_return_val_if_fail (core, false);
 	const char *name = (filter && filter->name)? filter->name : NULL;
 	bool ret = true;
 	ut64 at = UT64_MAX, loadaddr = r_bin_get_laddr (core->bin);
@@ -4530,17 +4801,15 @@ R_API bool r_core_bin_info(RCore *core, int action, PJ *pj, int mode, int va, RC
 	}
 	if ((action & R_CORE_BIN_ACC_FIELDS)) {
 		if (IS_MODE_SIMPLE (mode)) {
-			if ((action & R_CORE_BIN_ACC_HEADER) || action & R_CORE_BIN_ACC_FIELDS) {
-				/* ignore mode, just for quiet/simple here */
-				ret &= bin_fields (core, NULL, 0, va);
-			}
+			// ret &= bin_fields (core, NULL, mode, va);
+			ret &= bin_fields (core, NULL, mode, va);
+			// ret &= bin_header (core, mode);
+		} else if (IS_MODE_NORMAL (mode)) {
+			// ret &= bin_header (core, mode);
+			ret &= bin_fields (core, NULL, mode, va);
 		} else {
-			if (IS_MODE_NORMAL (mode)) {
-				ret &= bin_header (core, mode);
-			} else {
-				if ((action & R_CORE_BIN_ACC_HEADER) || action & R_CORE_BIN_ACC_FIELDS) {
-					ret &= bin_fields (core, pj, mode, va);
-				}
+			if ((action & R_CORE_BIN_ACC_HEADER) || action & R_CORE_BIN_ACC_FIELDS) {
+				ret &= bin_fields (core, pj, mode, va);
 			}
 		}
 	}
@@ -4564,23 +4833,7 @@ R_API bool r_core_bin_set_arch_bits(RCore *r, const char *name, const char *_arc
 		}
 	}
 	/* Check if the arch name is a valid name */
-	bool found_anal_plugin = false;
-	if (arch) {
-		if (r->anal->arch && !found_anal_plugin) {
-			RArchPlugin *arch_plugin;
-			RListIter *iter;
-			r_list_foreach (r->anal->arch->plugins, iter, arch_plugin) {	//XXX: fix this properly after 5.8
-				if (!arch_plugin->arch) {
-					continue;
-				}
-				if (!strcmp (arch_plugin->arch, arch)) {
-					found_anal_plugin = true;
-					break;
-				}
-			}
-		}
-	}
-	if (!found_anal_plugin) {
+	if (!(arch && r_arch_find (r->anal->arch, arch))) {
 		free (arch);
 		return false;
 	}
@@ -4691,6 +4944,7 @@ static bool r_core_bin_file_print(RCore *core, RBinFile *bf, PJ *pj, int mode) {
 		pj_ki (pj, "iofd", bf->fd);
 		pj_ki (pj, "bfid", bf->id);
 		pj_ki (pj, "size", bin_sz);
+		pj_kN (pj, "addr", bf->bo->baddr);
 		pj_ko (pj, "obj");
 		RBinObject *obj = bf->bo;
 		RBinInfo *info = obj->info;
@@ -4726,9 +4980,10 @@ static bool r_core_bin_file_print(RCore *core, RBinFile *bf, PJ *pj, int mode) {
 }
 
 R_API bool r_core_bin_list(RCore *core, int mode) {
+	r_return_val_if_fail (core, false);
 	// list all binfiles and there objects and there archs
 	RListIter *iter;
-	RBinFile *binfile = NULL; //, *cur_bf = r_bin_cur (core->bin) ;
+	RBinFile *binfile = NULL;
 	RBin *bin = core->bin;
 	const RList *binfiles = bin ? bin->binfiles: NULL;
 	if (!binfiles) {
@@ -4753,82 +5008,63 @@ R_API bool r_core_bin_list(RCore *core, int mode) {
 	return true;
 }
 
-R_API char *r_core_bin_method_flags_str(ut64 flags, int mode) {
-	int i;
-
-	RStrBuf *buf = r_strbuf_new ("");
+R_API char *r_core_bin_attr_tostring(ut64 flags, int mode) {
+	RStrBuf *buf = r_strbuf_new (""); // rename to 'sb'
 	if (IS_MODE_SET (mode) || IS_MODE_RAD (mode)) {
-		if (!flags) {
-			goto out;
-		}
-
-		for (i = 0; i < 64; i++) {
-			ut64 flag = flags & (1ULL << i);
-			if (flag) {
-				const char *flag_string = r_bin_get_meth_flag_string (flag, false);
-				if (flag_string) {
-					r_strbuf_appendf (buf, ".%s", flag_string);
-				}
+		if (flags) {
+			char *flag_string = r_bin_attr_tostring (flags, true);
+			if (flag_string) {
+				r_strbuf_append (buf, flag_string);
 			}
+			free (flag_string);
 		}
 	} else if (IS_MODE_JSON (mode)) {
-		if (!flags) {
+		if (flags) {
+			PJ *pj = pj_new ();
+			pj_a (pj);
+			char *flag_string = r_bin_attr_tostring (flags, false);
+			if (flag_string) {
+				pj_s (pj, flag_string);
+			} else {
+				// r_strf_var (numstr, 32, "0x%08"PFMT64x, flag);
+				pj_n (pj, flags);
+			}
+			pj_end (pj);
+			r_strbuf_append (buf, pj_string (pj));
+			pj_free (pj);
+			free (flag_string);
+		} else {
 			r_strbuf_append (buf, "[]");
-			goto out;
 		}
-		PJ *pj = pj_new ();
-		pj_a (pj);
-		for (i = 0; i < 64; i++) {
-			ut64 flag = flags & (1ULL << i);
-			if (flag) {
-				const char *flag_string = r_bin_get_meth_flag_string (flag, false);
-				if (flag_string) {
-					pj_s (pj, flag_string);
-				} else {
-					r_strf_var (numstr, 32, "0x%08"PFMT64x, flag);
-					pj_s (pj, numstr);
-				}
-			}
-		}
-		pj_end (pj);
-		r_strbuf_append (buf, pj_string (pj));
-		pj_free (pj);
 	} else {
-		int pad_len = 4; //TODO: move to a config variable
-		int len = 0;
-		if (!flags) {
-			goto padding;
-		}
-		for (i = 0; i < 64; i++) {
-			ut64 flag = flags & (1ULL << i);
-			if (flag) {
-				const char *flag_string = r_bin_get_meth_flag_string (flag, true);
-				if (flag_string) {
-					r_strbuf_append (buf, flag_string);
-				} else {
-					r_strbuf_append (buf, "?");
-				}
-				len++;
+		int len = 4;
+		if (flags) {
+			// const char *flag_string = r_bin_get_meth_flag_string (flag, true);
+			char *flag_string = r_bin_attr_tostring (flags, true);
+			if (flag_string) {
+				r_strbuf_append (buf, flag_string);
 			}
+			len -= strlen (flag_string);
+			if (len < 1) {
+				len = 1;
+			}
+			free (flag_string);
 		}
-padding:
-		for ( ; len < pad_len; len++) {
+		for ( ; len > 0; len--) {
 			r_strbuf_append (buf, " ");
 		}
 	}
-out:
 	return r_strbuf_drain (buf);
 }
 
 R_API bool r_core_bin_rebase(RCore *core, ut64 baddr) {
 	r_return_val_if_fail (core && core->bin, false);
-	if (!core->bin->cur || baddr == UT64_MAX) {
-		return false;
+	if (core->bin->cur && baddr != UT64_MAX) {
+		RBinFile *bf = core->bin->cur;
+		bf->bo->baddr = baddr;
+		bf->bo->loadaddr = baddr;
+		r_bin_object_set_items (bf, bf->bo);
+		return true;
 	}
-	RBinFile *bf = core->bin->cur;
-	bf->bo->baddr = baddr;
-	bf->bo->loadaddr = baddr;
-	r_bin_object_set_items (bf, bf->bo);
-	return true;
+	return false;
 }
-

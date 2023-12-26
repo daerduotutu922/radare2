@@ -51,19 +51,17 @@ static void print_string(RBinFile *bf, RBinString *string, int raw, PJ *pj) {
 	//  PrintfCallback temp = io->cb_printf;
 	switch (mode) {
 	case R_MODE_JSON:
-		{
-			if (pj) {
-				pj_o (pj);
-				pj_kn (pj, "vaddr", vaddr);
-				pj_kn (pj, "paddr", string->paddr);
-				pj_kn (pj, "ordinal", string->ordinal);
-				pj_kn (pj, "size", string->size);
-				pj_kn (pj, "length", string->length);
-				pj_ks (pj, "section", section_name);
-				pj_ks (pj, "type", type_string);
-				pj_ks (pj, "string", string->string);
-				pj_end (pj);
-			}
+		if (pj) {
+			pj_o (pj);
+			pj_kn (pj, "vaddr", vaddr);
+			pj_kn (pj, "paddr", string->paddr);
+			pj_kn (pj, "ordinal", string->ordinal);
+			pj_kn (pj, "size", string->size);
+			pj_kn (pj, "length", string->length);
+			pj_ks (pj, "section", section_name);
+			pj_ks (pj, "type", type_string);
+			pj_ks (pj, "string", string->string);
+			pj_end (pj);
 		}
 		break;
 	case R_MODE_SIMPLEST:
@@ -403,6 +401,8 @@ static int string_scan_range(RList *list, RBinFile *bf, int min, const ut64 from
 			bs->string = r_str_ndup ((const char *)tmp, i); // Use stringviews to save memory
 			if (strings_nofp) {
 				r_str_trim (bs->string); // trim spaces to ease readability
+			} else {
+				r_str_trim_tail (bs->string);
 			}
 			if (list) {
 				r_list_append (list, bs);
@@ -434,7 +434,7 @@ static int string_scan_range(RList *list, RBinFile *bf, int min, const ut64 from
 	return count;
 }
 
-static bool __isDataSection(RBinFile *a, RBinSection *s) {
+static bool is_data_section(RBinFile *a, RBinSection *s) {
 	if (s->has_strings || s->is_data) {
 		return true;
 	}
@@ -866,16 +866,16 @@ R_API RBinPlugin *r_bin_file_cur_plugin(RBinFile *bf) {
 
 // TODO: searchStrings() instead
 R_IPI RList *r_bin_file_get_strings(RBinFile *bf, int min, int dump, int raw) {
+	R_RETURN_VAL_IF_FAIL (bf, NULL);
+	RBinObject *o = bf->bo;
 	const bool nofp = bf->rbin->strings_nofp;
-	r_return_val_if_fail (bf, NULL);
 	RListIter *iter;
 	RBinSection *section;
 	RList *ret = dump? NULL: r_list_newf (r_bin_string_free);
 
-	if (!raw && bf && bf->bo && bf->bo->sections && !r_list_empty (bf->bo->sections)) {
-		RBinObject *o = bf->bo;
+	if (!raw && o && o->sections && !r_list_empty (o->sections)) {
 		r_list_foreach (o->sections, iter, section) {
-			if (__isDataSection (bf, section)) {
+			if (is_data_section (bf, section)) {
 				get_strings_range (bf, ret, min, raw, nofp, section->paddr,
 						section->paddr + section->size, section);
 			}
@@ -1053,19 +1053,19 @@ R_API RList *r_bin_file_set_hashes(RBin *bin, RList/*<RBinFileHash*/ *new_hashes
 	return prev_hashes;
 }
 
-R_API RBinClass *r_bin_class_new(const char *name, const char *super, int visibility) {
+R_API RBinClass *r_bin_class_new(const char *name, const char *super, ut64 attr) {
 	r_return_val_if_fail (name, NULL);
 	RBinClass *c = R_NEW0 (RBinClass);
 	if (c) {
-		c->name = strdup (name);
+		c->name = r_bin_name_new (name);
 		if (R_STR_ISNOTEMPTY (super)) {
 			c->super = r_list_newf (free);
-			r_list_append (c->super, strdup (super));
+			r_list_append (c->super, r_bin_name_new (super));
 		}
 		// TODO: use vectors!
 		c->methods = r_list_newf (r_bin_symbol_free);
 		c->fields = r_list_newf (r_bin_field_free);
-		c->visibility = visibility;
+		c->attr = attr;
 	}
 	return c;
 }
@@ -1081,7 +1081,7 @@ R_API void r_bin_class_free(RBinClass *k) {
 	}
 }
 
-R_API RBinClass *r_bin_file_add_class(RBinFile *bf, const char *name, const char *super, int view) {
+R_API RBinClass *r_bin_file_add_class(RBinFile *bf, const char *name, const char *super, ut64 attr) {
 	r_return_val_if_fail (name && bf && bf->bo, NULL);
 	RBinClass *c = __getClass (bf, name);
 	if (c) {
@@ -1092,7 +1092,7 @@ R_API RBinClass *r_bin_file_add_class(RBinFile *bf, const char *name, const char
 		}
 		return c;
 	}
-	c = r_bin_class_new (name, super, view);
+	c = r_bin_class_new (name, super, attr);
 	if (c) {
 		// XXX. no need for a list, the ht is iterable too
 		c->index = r_list_length (bf->bo->classes);
@@ -1116,7 +1116,7 @@ R_API RBinSymbol *r_bin_file_add_method(RBinFile *bf, const char *klass, const c
 	if (!sym) {
 		sym = R_NEW0 (RBinSymbol);
 		if (sym) {
-			sym->name = strdup (method);
+			sym->name = r_bin_name_new (method);
 			sym->lang = lang;
 			char *name = r_str_newf ("%s::%s", klass, method);
 			ht_pp_insert (bf->bo->methods_ht, name, sym);

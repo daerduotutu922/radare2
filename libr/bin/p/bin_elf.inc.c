@@ -10,14 +10,6 @@
 
 static RBinInfo* info(RBinFile *bf);
 
-static int get_file_type(RBinFile *bf) {
-	ELFOBJ *eo = bf->bo->bin_obj;
-	char *type = Elf_(get_file_type (eo));
-	int res = type? (r_str_startswith (type, "CORE") ? R_BIN_TYPE_CORE : R_BIN_TYPE_DEFAULT) : -1;
-	free (type);
-	return res;
-}
-
 static RList *maps(RBinFile *bf) {
 	r_return_val_if_fail (bf && bf->bo, NULL);
 	return Elf_(get_maps)(bf->bo->bin_obj);
@@ -46,7 +38,8 @@ static void setimpord(ELFOBJ* eo, ut32 ord, RBinImport *ptr) {
 	if (!eo->imports_by_ord || ord >= eo->imports_by_ord_size) {
 		return;
 	}
-	r_bin_import_free (eo->imports_by_ord[ord]);
+	// leak or uaf wtf
+	// r_bin_import_free (eo->imports_by_ord[ord]);
 	eo->imports_by_ord[ord] = r_bin_import_clone (ptr);
 }
 
@@ -378,7 +371,7 @@ static bool symbols_vec(RBinFile *bf) {
 			// add it to the list of symbols only if it doesn't point to SHT_NULL
 			continue;
 		}
-		RBinSymbol *ptr = Elf_(convert_symbol) (eo, symbol, "%s");
+		RBinSymbol *ptr = Elf_(convert_symbol) (eo, symbol);
 		if (!ptr) {
 			break;
 		}
@@ -398,7 +391,7 @@ static bool symbols_vec(RBinFile *bf) {
 			continue;
 		}
 
-		RBinSymbol *ptr = Elf_(convert_symbol) (eo, symbol, "%s");
+		RBinSymbol *ptr = Elf_(convert_symbol) (eo, symbol);
 		if (!ptr) {
 			break;
 		}
@@ -435,7 +428,7 @@ static RList* imports(RBinFile *bf) {
 		if (!ptr) {
 			break;
 		}
-		ptr->name = strdup (is->name);
+		ptr->name = r_bin_name_new (is->name);
 		ptr->bind = is->bind;
 		ptr->type = is->type;
 		ptr->ordinal = is->ordinal;
@@ -979,15 +972,16 @@ static void lookup_symbols(RBinFile *bf, RBinInfo *ret) {
 			if (ret->has_canary && is_rust) {
 				break;
 			}
-			if (!strcmp (symbol->name, "_NSConcreteGlobalBlock")) {
+			const char *oname = r_bin_name_tostring2 (symbol->name, 'o');
+			if (!strcmp (oname, "_NSConcreteGlobalBlock")) {
 				ret->lang = (ret->lang && !strcmp (ret->lang, "c++"))? "c++ blocks ext.": "c blocks ext.";
 			}
 			if (!ret->has_canary) {
-				if (strstr (symbol->name, "__stack_chk_fail") || strstr (symbol->name, "__stack_smash_handler")) {
+				if (strstr (oname, "__stack_chk_fail") || strstr (oname, "__stack_smash_handler")) {
 					ret->has_canary = true;
 				}
 			}
-			if (!is_rust && !strcmp (symbol->name, "__rust_oom")) {
+			if (!is_rust && !strcmp (oname, "__rust_oom")) {
 				is_rust = true;
 				ret->lang = "rust";
 			}
@@ -1036,7 +1030,7 @@ static bool has_sanitizers(RBinFile *bf) {
 	RListIter *iter;
 	RBinImport *import;
 	r_list_foreach (imports_list, iter, import) {
-		const char *iname = import->name;
+		const char *iname = r_bin_name_tostring2 (import->name, 'o');
 		if (*iname == '_' && (strstr (iname, "__sanitizer") || strstr (iname, "__ubsan"))) {
 			ret = true;
 			break;
@@ -1133,51 +1127,53 @@ static RList* fields(RBinFile *bf) {
 	if (!ret) {
 		return NULL;
 	}
-	r_strf_buffer (32);
-	#define ROW(nam, siz, val, fmt) \
-		r_list_append (ret, r_bin_field_new (addr, addr, siz, nam, r_strf ("0x%08"PFMT64x, (ut64)val), fmt, false));
+	#define ROW(nam, siz, val, fmt, cmt) \
+		r_list_append (ret, r_bin_field_new (addr, addr, val, siz, nam, cmt, fmt, false));
 	if (r_buf_size (bf->buf) < sizeof (Elf_ (Ehdr))) {
 		return ret;
 	}
 	ut64 addr = 0;
-	ROW ("ELF", 4, r_buf_read_le32_at (bf->buf, addr), "x");
+	ROW ("ELF", 4, r_buf_read_le32_at (bf->buf, addr), "x", NULL);
 	addr += 0x10;
-	ROW ("Type", 2, r_buf_read_le16_at (bf->buf, addr), "x");
+	ROW ("Type", 2, r_buf_read_le16_at (bf->buf, addr), "w", NULL);
 	addr += 0x2;
-	ROW ("Machine", 2, r_buf_read_le16_at (bf->buf, addr), "x");
+	ROW ("Machine", 2, r_buf_read_le16_at (bf->buf, addr), "w", NULL);
 	addr += 0x2;
-	ROW ("Version", 4, r_buf_read_le32_at (bf->buf, addr), "x");
+	ROW ("Version", 4, r_buf_read_le32_at (bf->buf, addr), "x", NULL);
 	addr += 0x4;
 
 	if (r_buf_read8_at (bf->buf, 0x04) == 1) {
-		ROW ("Entry point", 4, r_buf_read_le32_at (bf->buf, addr), "x");
+		ROW ("Entry point", 4, r_buf_read_le32_at (bf->buf, addr), "x", NULL);
 		addr += 0x4;
-		ROW ("PhOff", 4, r_buf_read_le32_at (bf->buf, addr), "x");
+		ROW ("PhOff", 4, r_buf_read_le32_at (bf->buf, addr), "x", NULL);
 		addr += 0x4;
-		ROW ("ShOff", 4, r_buf_read_le32_at (bf->buf, addr), "x");
+		ut32 shoff = r_buf_read_le32_at (bf->buf, addr);
+		ROW ("ShOff", 4, shoff, "x", NULL);
 		addr += 0x4;
 	} else {
-		ROW ("Entry point", 8, r_buf_read_le64_at (bf->buf, addr), "x");
+		ROW ("EntryPoint", 8, r_buf_read_le64_at (bf->buf, addr), "q", NULL);
 		addr += 0x8;
-		ROW ("PhOff", 8, r_buf_read_le64_at (bf->buf, addr), "x");
+		ut64 phoff = r_buf_read_le64_at (bf->buf, addr);
+		ROW ("PhOff", 8, phoff, "q", NULL);
 		addr += 0x8;
-		ROW ("ShOff", 8, r_buf_read_le64_at (bf->buf, addr), "x");
+		ut64 shoff = r_buf_read_le64_at (bf->buf, addr);
+		ROW ("ShOff", 8, shoff, "q", NULL);
 		addr += 0x8;
 	}
 
-	ROW ("Flags", 4, r_buf_read_le32_at (bf->buf, addr), "x");
+	ROW ("Flags", 4, r_buf_read_le32_at (bf->buf, addr), "x", NULL);
 	addr += 0x4;
-	ROW ("EhSize", 2, r_buf_read_le16_at (bf->buf, addr), "x");
+	ROW ("EhSize", 2, r_buf_read_le16_at (bf->buf, addr), "w", NULL);
 	addr += 0x2;
-	ROW ("PhentSize", 2, r_buf_read_le16_at (bf->buf, addr), "x");
+	ROW ("PhentSize", 2, r_buf_read_le16_at (bf->buf, addr), "w", NULL);
 	addr += 0x2;
-	ROW ("PhNum", 2, r_buf_read_le16_at (bf->buf, addr), "x");
+	ROW ("PhNum", 2, r_buf_read_le16_at (bf->buf, addr), "w", NULL);
 	addr += 0x2;
-	ROW ("ShentSize", 2, r_buf_read_le16_at (bf->buf, addr), "x");
+	ROW ("ShentSize", 2, r_buf_read_le16_at (bf->buf, addr), "w", NULL);
 	addr += 0x2;
-	ROW ("ShNum", 2, r_buf_read_le16_at (bf->buf, addr), "x");
+	ROW ("ShNum", 2, r_buf_read_le16_at (bf->buf, addr), "w", NULL);
 	addr += 0x2;
-	ROW ("ShrStrndx", 2, r_buf_read_le16_at (bf->buf, addr), "x");
+	ROW ("ShrStrndx", 2, r_buf_read_le16_at (bf->buf, addr), "w", NULL);
 
 	return ret;
 }
